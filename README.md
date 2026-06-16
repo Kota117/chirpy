@@ -16,12 +16,17 @@ go mod tidy
 ```
 
 
+## Architecture
+Chirpy follows a monolithic structure but maintains a clean separation between the user-facing application and the data API by using `/app` and `/api` namespaces.
+
+
 ## Features
-- **Static File Serving**: Serves HTML and media assets from the `/app/` path using `http.FileServer` and `http.StripPrefix`.
-- **Health Check Endpoint**: Includes a lightweight readiness endpoint at `GET /healthz` to verify server availability.
-- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible at `GET /metrics`.  
+- **Static File Serving**: Serves HTML and media assets from the `/app/` path using `http.FileServer` and `http.StripPrefix`.  
+*Note: The `http.StripPrefix` allows the file system to remain agnostic of the URL structure.*
+- **Health Check Endpoint**: Includes a lightweight readiness endpoint at `GET /api/healthz` to verify server availability.
+- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible at `GET /api/metrics`.  
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
-- **Metrics Reset**: Resets the hit counter back to zero via the `POST /reset` endpoint.
+- **Metrics Reset**: Resets the hit counter back to zero via the `POST /api/reset` endpoint.
 
 
 ## Project Structure
@@ -30,17 +35,13 @@ go mod tidy
 ├── assets/      # Static assets like images and logos
 │   └── logo.png
 ├── .gitignore   # Disables version-tracking for any included files/folders
+├── go.mod       # Go module definition
+├── index.html   # Root HTML file served at http://localhost:8080
 ├── main.go      # Entry point for the Go server
 ├── metrics.go   # Handler for getting the number of requests since the server was last started
 ├── readiness.go # Handler for testing if the server is up and ready to receive traffic
-├── reset.go     # Handler for resetting the request counter
-├── index.html   # Root HTML file served at http://localhost:8080
-└── go.mod       # Go module definition
+└── reset.go     # Handler for resetting the request counter
 ```
-
-
-## Usage
-To serve additional media assets, place them in the assets/ directory. They will be automatically available at `http://localhost:8080/app/assets/<filename>`.
 
 
 ## Running the Server
@@ -58,28 +59,37 @@ go build -o out && ./out
 *Note: Go is a compiled language, so the server will not automatically reflect code changes. The server must be stopped with `Ctrl+C`, rebuilt with the above command, and restarted whenever changes are made.*
 
 
-## Testing the Server
-While the server is running in one terminal window, it can be manually tested in another terminal window. Alternatively, the entire breadth of content can be viewed in a browser at `http://localhost:8080/app/`.
+## Usage
+| Endpoint       | Method | Description                  |
+| -------------- | ------ | ---------------------------- |
+| `/app/*`       | GET    | Serves static frontend files |
+| `/api/healthz` | GET    | Readiness check              |
+| `/api/metrics` | GET    | Retrieve hit counter         |
+| `/api/reset`   | POST   | Reset hit counter            |
 
-### Inspect index.html
+
+## Manually Testing the Server
+While the server is running in one terminal window, the back-end can be manually tested in another terminal window. Additionally, the front-end content can be viewed in a browser at `http://localhost:8080/app/`.
+
+### Inspect the contents of index.html
 ```bash
 curl -i http://localhost:8080/app/
 ```
+* `-i`/`--include`: Tells `curl` to print the HTTP response headers along with any body content.
+*Note: The default HTTP method used by curl is `GET`.*
 
-* `-i`/`--include`: Tells `curl` to print the HTTP response headers (like `HTTP/1.1 404 Not Found`) along with any body content.
-
-### Inspect Media
+### Inspect specific media
 ```bash
 curl -I http://localhost:8080/app/assets/logo.png
 ```
+* `-I`/`--head`: Tells `curl` to print only the HTTP response headers without any body content  
+*Note: To serve additional media assets, place them in the assets/ directory. They will be automatically available at `http://localhost:8080/app/assets/<filename>`.*
 
-* `-I`/`--head`: Tells `curl` to print only the HTTP response headers without any body content
-
-### Inspect the Health Endpoint
+### Check if the server is available
 To check if the server is up and ready to receive traffic (only accepts `GET` requests):
 
 ```bash
-curl -i http://localhost:8080/healthz
+curl -i http://localhost:8080/api/healthz
 ```
 
 Expected response:
@@ -94,7 +104,7 @@ OK
 The server will reject any HTTP method other than `GET` at this endpoint:
 
 ```bash
-curl -i -X POST http://localhost:8080/healthz
+curl -i -X POST http://localhost:8080/api/healthz
 ```
 
 Expected response:
@@ -105,20 +115,20 @@ HTTP/1.1 405 Method Not Allowed
 
 ### Check how many requests have been served
 ```bash
-curl -i http://localhost:8080/metrics
+curl -i http://localhost:8080/api/metrics
 ```
 
 Expected response:
 ```text
 Hits: 3
 ```
-*Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started*
+*Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started or the request counter was reset*
 
 ### Reset the request counter
 Only accepts `POST` requests:
 
 ```bash
-curl -i -X POST http://localhost:8080/reset
+curl -i -X POST http://localhost:8080/api/reset
 ```
 
 Expected response:
@@ -126,4 +136,4 @@ Expected response:
 Hits reset to 0
 ```
 
-*Note: Sending any non-`POST` HTTP request to `/reset` will result in a `405 Method Not Allowed` response.*
+*Note: Sending any non-`POST` HTTP request to `/api/reset` will result in a `405 Method Not Allowed` response.*
