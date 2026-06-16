@@ -16,13 +16,19 @@ go mod tidy
 ## Features
 - **Static File Serving**: Serves HTML and media assets from the `/app/` path using `http.FileServer` and `http.StripPrefix`.
 - **Health Check Endpoint**: Includes a lightweight readiness endpoint at `/healthz` to verify server availability.
+- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible at `/metrics`.  
+*Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
+- **Metrics Reset**: Resets the hit counter back to zero via the `/reset` endpoint.
 
 ## Project Structure
 ```text
 .
 ├── assets/      # Static assets like images and logos
 │   └── logo.png
+├── .gitignore   # Disables version-tracking for any included files/folders
 ├── main.go      # Entry point for the Go server
+├── readiness.go # Handler for testing if the server is up and ready to receive traffic
+├── reset.go     # Handler for resetting the request counter
 ├── index.html   # Root HTML file served at http://localhost:8080
 └── go.mod       # Go module definition
 ```
@@ -41,6 +47,7 @@ go build -o out && ./out
 * `&&`: A bash logical AND operator. Ensures `./out` runs if and only if the compilation step succeeds (exits with status code 0).
 * `./out`: Executes the newly compiled binary.
 
+*Note: Per standard practice, the compiled `out` binary is not version-tracked.*  
 *Note: Go is a compiled language, so the server will not automatically reflect code changes. The server must be stopped with `Ctrl+C`, rebuilt with the above command, and restarted whenever changes are made.*
 
 ## Testing the Server
@@ -74,4 +81,25 @@ Content-Type: text/plain; charset=utf-8
 Content-Length: 2
 
 OK
+```
+
+### Check how many requests have been served
+```bash
+curl -i http://localhost:8080/metrics
+```
+
+Expected response:
+```text
+Hits: 3
+```
+*Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started*
+
+### Reset the request counter
+```bash
+curl -i http://localhost:8080/reset
+```
+
+Expected response:
+```text
+Hits reset to 0
 ```
