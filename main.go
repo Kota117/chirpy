@@ -6,18 +6,18 @@ import (
 )
 
 func main() {
-	const filepathRoot = "."
+	const filepathRoot string = "."
 
 	// port "80" is the default http port, but ports 1-1023 are protected so 8080 is a standard alternative
-	const port = "8080"
+	const port string = "8080"
 
 	// "mux" is short for "multiplexer"
-	mux := http.NewServeMux()
+	var mux *http.ServeMux = http.NewServeMux()
 
 	mux.Handle("/", http.FileServer(http.Dir(filepathRoot)))
 
 	// "server" is a pointer to an "http.Server" struct
-	server := &http.Server{
+	var server *http.Server = &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
