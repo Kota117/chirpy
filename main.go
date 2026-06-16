@@ -6,18 +6,28 @@ import (
 )
 
 func main() {
+	const filepathRoot string = "."
+
 	// port "80" is the default http port, but ports 1-1023 are protected so 8080 is a standard alternative
-	const port = "8080"
+	const port string = "8080"
 
 	// "mux" is short for "multiplexer"
-	mux := http.NewServeMux()
+	var mux *http.ServeMux = http.NewServeMux()
 
-	// "server" is a pointer to an "http.Server" struct
-	server := &http.Server{
+	mux.Handle("/app/", http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
+	mux.HandleFunc("/healthz", handlerReadiness)
+
+	var server *http.Server = &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}
 
-	log.Printf("Serving on port: %s\n", port)
+	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
 	log.Fatal(server.ListenAndServe())
+}
+
+func handlerReadiness(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(http.StatusText(http.StatusOK)))
 }
