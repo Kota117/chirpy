@@ -15,6 +15,17 @@ Before running the server for the first time, initialize the Go module:
 go mod init github.com/Kota117/chirpy
 ```
 
+## Features
+- **Static File Serving**: Serves HTML, CSS, and JavaScript assets from the root directory using Go's standard library `http.FileServer`.
+
+## Project Structure
+```text
+.
+├── main.go      # Entry point for the Go server
+├── index.html   # Root HTML file served at http://localhost:8080
+└── go.mod       # Go module definition
+```
+
 ## Running the Server
 
 To build and run the server locally on port `8080`, run the following command in a terminal from the root directory of the project:
