@@ -17,16 +17,17 @@ go mod tidy
 
 
 ## Architecture
-Chirpy follows a monolithic structure but maintains a clean separation between the user-facing application and the data API by using `/app` and `/api` namespaces.
+Chirpy follows a monolithic structure but maintains a clean separation between the user-facing application, the data API, and administrative tooling by using `/app`, `/api`, and `/admin` namespaces.  
+*Note: The `/admin` namespace is **not** inherently more secure than the others, it is simply an organizational structure.*
 
 
 ## Features
 - **Static File Serving**: Serves HTML and media assets from the `/app/` path using `http.FileServer` and `http.StripPrefix`.  
 *Note: The `http.StripPrefix` allows the file system to remain agnostic of the URL structure.*
 - **Health Check Endpoint**: Includes a lightweight readiness endpoint at `GET /api/healthz` to verify server availability.
-- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible at `GET /api/metrics`.  
+- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible via the `GET /admin/metrics` endpoint.  
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
-- **Metrics Reset**: Resets the hit counter back to zero via the `POST /api/reset` endpoint.
+- **Metrics Reset**: Resets the hit counter back to zero via the `POST /admin/reset` endpoint.
 
 
 ## Project Structure
@@ -60,16 +61,18 @@ go build -o out && ./out
 
 
 ## Usage
-| Endpoint       | Method | Description                  |
-| -------------- | ------ | ---------------------------- |
-| `/app/*`       | GET    | Serves static frontend files |
-| `/api/healthz` | GET    | Readiness check              |
-| `/api/metrics` | GET    | Retrieve hit counter         |
-| `/api/reset`   | POST   | Reset hit counter            |
+| Endpoint         | Method | Description                  |
+| ---------------- | ------ | ---------------------------- |
+| `/app/*`         | GET    | Serves static frontend files |
+| `/api/healthz`   | GET    | Readiness check              |
+| `/admin/metrics` | GET    | Retrieve hit counter (HTML)  |
+| `/admin/reset`   | POST   | Reset hit counter            |
 
 
 ## Manually Testing the Server
-While the server is running in one terminal window, the back-end can be manually tested in another terminal window. Additionally, the front-end content can be viewed in a browser at `http://localhost:8080/app/`.
+While the server is running in one terminal window, the back-end can be manually tested in another terminal window. Additionally, the front-end content can be viewed in a browser at `http://localhost:8080/app/`.  
+  
+Admin metrics can be viewed at `http://localhost:8080/admin/metrics`.
 
 ### Inspect the contents of index.html
 ```bash
@@ -96,7 +99,7 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
-Content-Length: 2
+...
 
 OK
 ```
@@ -115,20 +118,29 @@ HTTP/1.1 405 Method Not Allowed
 
 ### Check how many requests have been served
 ```bash
-curl -i http://localhost:8080/api/metrics
+curl -i http://localhost:8080/admin/metrics
 ```
 
 Expected response:
 ```text
-Hits: 3
+HTTP/1.1 200 OK
+Content-Type: text/html
+...
+
+<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited 3 times!</p>
+  </body>
+</html>
 ```
-*Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started or the request counter was reset*
+*Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started or the request counter was reset.*
 
 ### Reset the request counter
 Only accepts `POST` requests:
 
 ```bash
-curl -i -X POST http://localhost:8080/api/reset
+curl -i -X POST http://localhost:8080/admin/reset
 ```
 
 Expected response:
@@ -136,4 +148,4 @@ Expected response:
 Hits reset to 0
 ```
 
-*Note: Sending any non-`POST` HTTP request to `/api/reset` will result in a `405 Method Not Allowed` response.*
+*Note: Sending any non-`POST` HTTP request to `/admin/reset` will result in a `405 Method Not Allowed` response.*
