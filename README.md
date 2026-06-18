@@ -22,7 +22,8 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Health Check Endpoint**: Includes a lightweight readiness endpoint at `GET /api/healthz` to verify server availability.
 - **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible via the `GET /admin/metrics` endpoint.  
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
-- **Metrics Reset**: Resets the hit counter back to zero via the `POST /admin/reset` endpoint.
+- **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
+- **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` in the JSON request body and returns the user's `id`, `created_at`, `updated_at`, and `email`.
 
 
 ## Project Structure
@@ -44,6 +45,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 ├── handler_readiness.go     # Handler for testing if the server is up and ready to receive traffic
 ├── handler_reset.go         # Handler for resetting the request counter
 ├── handler_validate.go      # Handler for validating Chirp content
+├── handler_users_create.go  # Handler for creating a new user
 ├── index.html               # Root HTML file served at http://localhost:8080
 ├── json.go                  # Shared helpers for encoding JSON responses and errors
 ├── main.go                  # Entry point for the Go server
@@ -129,11 +131,13 @@ Chirpy reads configuration from a `.env` file in the project root. This file is 
 Create a `.env` file with the following:
 ```bash
 DB_URL="postgres://username:password@localhost:5432/chirpy?sslmode=disable"
+PLATFORM="<dev|prod>"
 ```
 
 Example (Linux/WSL):
 ```bash
 DB_URL="postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
+PLATFORM="dev"
 ```
 
 
@@ -193,13 +197,14 @@ sqlc generate
 *Note: This command should be run from the `root` of the project.*
 
 ## Usage
-| Endpoint              | Method | Description                                          |
-| --------------------- | ------ | ---------------------------------------------------- |
-| `/app/*`              | GET    | Serves static frontend files                         |
-| `/api/healthz`        | GET    | Readiness check                                      |
-| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars, profanity filtered) |
-| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)                          |
-| `/admin/reset`        | POST   | Reset hit counter                                    |
+| Endpoint              | Method | Description                                                   |
+| --------------------- | ------ | ------------------------------------------------------------- |
+| `/app/*`              | GET    | Serves static frontend files                                  |
+| `/api/healthz`        | GET    | Readiness check                                               |
+| `/api/users`          | POST   | Create new user                                               |
+| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars, profanity filtered)          |
+| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)                                   |
+| `/admin/reset`        | POST   | Reset hit counter and delete all users (dev environment only) |
 
 
 ## Running the Server
@@ -285,8 +290,8 @@ Content-Type: text/html
 ```
 *Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started or the request counter was reset.*
 
-### Reset the request counter
-Only accepts `POST` requests:
+### Reset the request counter and user database
+Only accepts `POST` requests. Only accessible if `PLATFORM=dev`:
 
 ```bash
 curl -i -X POST http://localhost:8080/admin/reset
@@ -294,7 +299,7 @@ curl -i -X POST http://localhost:8080/admin/reset
 
 Expected response:
 ```text
-Hits reset to 0
+Hits reset to 0 and database reset to initial state.
 ```
 
 *Note: Sending any non-`POST` HTTP request to `/admin/reset` will result in a `405 Method Not Allowed` response.*
@@ -368,3 +373,25 @@ Content-Type: application/json
 
 {"cleaned_body":"This **** is a really good ****"}
 ```
+
+### Create new user
+```bash
+curl -i -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+...
+
+{
+  "id": "50746277-23c6-4d85-a890-564c0044c2fb",
+  "created_at": "2021-07-07T00:00:00Z",
+  "updated_at": "2021-07-07T00:00:00Z",
+  "email": "user@example.com"
+}
+```
+*Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run.*
