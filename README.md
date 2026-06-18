@@ -33,15 +33,17 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 ## Project Structure
 ```text
 .
-├── assets/      # Static assets like images and logos
+├── assets/              # Static assets like images and logos
 │   └── logo.png
-├── .gitignore   # Disables version-tracking for any included files/folders
-├── go.mod       # Go module definition
-├── index.html   # Root HTML file served at http://localhost:8080
-├── main.go      # Entry point for the Go server
-├── metrics.go   # Handler for getting the number of requests since the server was last started
-├── readiness.go # Handler for testing if the server is up and ready to receive traffic
-└── reset.go     # Handler for resetting the request counter
+├── .gitignore           # Disables version-tracking for any included files/folders
+├── go.mod               # Go module definition
+├── handler_metrics.go   # Handler for getting the number of requests since the server was last started
+├── handler_readiness.go # Handler for testing if the server is up and ready to receive traffic
+├── handler_reset.go     # Handler for resetting the request counter
+├── handler_validate.go  # Handler for validating Chirp content
+├── index.html           # Root HTML file served at http://localhost:8080
+├── json.go              # Shared helpers for encoding JSON responses and errors
+└── main.go              # Entry point for the Go server
 ```
 
 
@@ -61,12 +63,13 @@ go build -o out && ./out
 
 
 ## Usage
-| Endpoint         | Method | Description                  |
-| ---------------- | ------ | ---------------------------- |
-| `/app/*`         | GET    | Serves static frontend files |
-| `/api/healthz`   | GET    | Readiness check              |
-| `/admin/metrics` | GET    | Retrieve hit counter (HTML)  |
-| `/admin/reset`   | POST   | Reset hit counter            |
+| Endpoint              | Method | Description                      |
+| --------------------- | ------ | -------------------------------- |
+| `/app/*`              | GET    | Serves static frontend files     |
+| `/api/healthz`        | GET    | Readiness check                  |
+| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars) |
+| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)      |
+| `/admin/reset`        | POST   | Reset hit counter                |
 
 
 ## Manually Testing the Server
@@ -109,6 +112,7 @@ The server will reject any HTTP method other than `GET` at this endpoint:
 ```bash
 curl -i -X POST http://localhost:8080/api/healthz
 ```
+* `-X [METHOD]`: Tells `curl` what HTTP method to use.
 
 Expected response:
 ```text
@@ -149,3 +153,38 @@ Hits reset to 0
 ```
 
 *Note: Sending any non-`POST` HTTP request to `/admin/reset` will result in a `405 Method Not Allowed` response.*
+
+### Validate a chirp
+Chirps can have a maximum of 140 characters.
+
+```bash
+curl -i -X POST http://localhost:8080/api/validate_chirp \
+  -H "Content-Type: application/json" \
+  -d '{"body": "This is a valid chirp"}'
+```
+* `-H`/`--header`: Sets a request header.
+* `-d`/`--data`: Sets the request body (the "data"). If used, `curl` will automatically switch to use the `POST` method if one wasn't specified explicitly with `-X`.
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+...
+
+{"valid":true}
+```
+
+```bash
+curl -i -X POST http://localhost:8080/api/validate_chirp \
+  -H "Content-Type: application/json" \
+  -d '{"body": "lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut pharetra finibus enim eu mattis. Phasellus malesuada nibh at lacus fringilla nam."}'
+```
+
+Expected response:
+```text
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+...
+
+{"error":"Chirp is too long"}
+```
