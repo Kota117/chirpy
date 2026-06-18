@@ -7,6 +7,41 @@ A fully-featured social media platform API written in Go.
 - **Go**: Version 1.22+ installed on the local machine.
 - **curl**: For manually testing API endpoints via the terminal.
 - **PostgreSQL**: Version 15+ (installed via WSL/Ubuntu).
+- **Goose**: For running database migrations (`go install github.com/pressly/goose/v3/cmd/goose@latest`).
+
+
+## Architecture
+Chirpy follows a monolithic structure but maintains a clean separation between the user-facing application, the data API, and administrative tooling by using `/app`, `/api`, and `/admin` namespaces.  
+*Note: The `/admin` namespace is **not** inherently more secure than the others, it is simply an organizational structure.*
+
+
+## Features
+- **Static File Serving**: Serves HTML and media assets from the `/app/` path using `http.FileServer` and `http.StripPrefix`.  
+*Note: The `http.StripPrefix` allows the file system to remain agnostic of the URL structure.*
+- **Health Check Endpoint**: Includes a lightweight readiness endpoint at `GET /api/healthz` to verify server availability.
+- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible via the `GET /admin/metrics` endpoint.  
+*Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
+- **Metrics Reset**: Resets the hit counter back to zero via the `POST /admin/reset` endpoint.
+
+
+## Project Structure
+```text
+.
+├── assets/                  # Static assets like images and logos
+│   └── logo.png
+├── sql/                     
+│   └── schema/              # SQL schemas
+│       └── 001_users.sql    # Migration: creates the users table
+├── .gitignore               # Disables version-tracking for any included files/folders
+├── go.mod                   # Go module definition
+├── handler_metrics.go       # Handler for getting the number of requests since the server was last started
+├── handler_readiness.go     # Handler for testing if the server is up and ready to receive traffic
+├── handler_reset.go         # Handler for resetting the request counter
+├── handler_validate.go      # Handler for validating Chirp content
+├── index.html               # Root HTML file served at http://localhost:8080
+├── json.go                  # Shared helpers for encoding JSON responses and errors
+└── main.go                  # Entry point for the Go server
+```
 
 
 ## Setup
@@ -39,7 +74,7 @@ sudo passwd postgres
 ```
 
 ### 3. Start the PostgreSQL Service
-PostgreSQL does not start automatically on WSL. It must started manually when development begins:
+PostgreSQL does not start automatically on WSL. It must be started manually when development begins:
 ```bash
 sudo service postgresql start
 ```
@@ -53,12 +88,12 @@ sudo -u postgres psql
 Once inside the `postgres=#` prompt, run the following SQL queries:
 
 1. Create the application database:
-    ```bash
+    ```sql
     CREATE DATABASE chirpy;
     ```
 
 2. Set the database password for the `postgres` user:
-    ```bash
+    ```sql
     ALTER USER postgres WITH PASSWORD 'postgres';
     ```
 
@@ -73,35 +108,61 @@ Once inside the `postgres=#` prompt, run the following SQL queries:
     \q
     ```
 
-## Architecture
-Chirpy follows a monolithic structure but maintains a clean separation between the user-facing application, the data API, and administrative tooling by using `/app`, `/api`, and `/admin` namespaces.  
-*Note: The `/admin` namespace is **not** inherently more secure than the others, it is simply an organizational structure.*
 
+## Database Migrations
+Chirpy uses [Goose](https://github.com/pressly/goose) to manage database schema migrations. Migration files live in `sql/schema/` and are plain `.sql` files with special Goose comments.
 
-## Features
-- **Static File Serving**: Serves HTML and media assets from the `/app/` path using `http.FileServer` and `http.StripPrefix`.  
-*Note: The `http.StripPrefix` allows the file system to remain agnostic of the URL structure.*
-- **Health Check Endpoint**: Includes a lightweight readiness endpoint at `GET /api/healthz` to verify server availability.
-- **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible via the `GET /admin/metrics` endpoint.  
-*Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
-- **Metrics Reset**: Resets the hit counter back to zero via the `POST /admin/reset` endpoint.
-
-
-## Project Structure
-```text
-.
-├── assets/              # Static assets like images and logos
-│   └── logo.png
-├── .gitignore           # Disables version-tracking for any included files/folders
-├── go.mod               # Go module definition
-├── handler_metrics.go   # Handler for getting the number of requests since the server was last started
-├── handler_readiness.go # Handler for testing if the server is up and ready to receive traffic
-├── handler_reset.go     # Handler for resetting the request counter
-├── handler_validate.go  # Handler for validating Chirp content
-├── index.html           # Root HTML file served at http://localhost:8080
-├── json.go              # Shared helpers for encoding JSON responses and errors
-└── main.go              # Entry point for the Go server
+### Running Migrations
+To upgrade the database to new schema, `cd` into the `sql/schema` directory, then run:
+```bash
+goose postgres "<connection_string>" up
 ```
+
+To revert the most recent migration:
+```bash
+goose postgres "<connection_string>" down
+```
+
+**Connection string format:**
+```text
+postgres://username:password@host:port/database
+```
+
+Example (Linux/WSL):
+```bash
+goose postgres "postgres://postgres:postgres@localhost:5432/chirpy" up
+```
+
+**Verify the migration applied successfully:**
+```bash
+psql "<connection_string>"
+\dt
+```
+
+Example (Linux/WSL):
+```bash
+psql "postgres://postgres:postgres@localhost:5432/chirpy"
+\dt
+```
+
+
+## Current Schema
+| Table |	Column      | Type      |	Constraints      |
+| ----- | ----------- | --------- | ---------------- |
+| users	| id	        | UUID    	| PRIMARY KEY      |
+| users	| created_at	| TIMESTAMP	| NOT NULL         |
+| users	| updated_at	| TIMESTAMP |	NOT NULL         |
+| users	| email	      | TEXT    	| NOT NULL, UNIQUE |
+
+
+## Usage
+| Endpoint              | Method | Description                                          |
+| --------------------- | ------ | ---------------------------------------------------- |
+| `/app/*`              | GET    | Serves static frontend files                         |
+| `/api/healthz`        | GET    | Readiness check                                      |
+| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars, profanity filtered) |
+| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)                          |
+| `/admin/reset`        | POST   | Reset hit counter                                    |
 
 
 ## Running the Server
@@ -117,16 +178,6 @@ go build -o out && ./out
 
 *Note: Per standard practice, the compiled `out` binary is not version-tracked.*  
 *Note: Go is a compiled language, so the server will not automatically reflect code changes. The server must be stopped with `Ctrl+C`, rebuilt with the above command, and restarted whenever changes are made.*
-
-
-## Usage
-| Endpoint              | Method | Description                                          |
-| --------------------- | ------ | ---------------------------------------------------- |
-| `/app/*`              | GET    | Serves static frontend files                         |
-| `/api/healthz`        | GET    | Readiness check                                      |
-| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars, profanity filtered) |
-| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)                          |
-| `/admin/reset`        | POST   | Reset hit counter                                    |
 
 
 ## Manually Testing the Server
