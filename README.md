@@ -6,6 +6,7 @@ A fully-featured social media platform API written in Go.
 ## Prerequisites
 - **Go**: Version 1.22+ installed on the local machine.
 - **curl**: For manually testing API endpoints via the terminal.
+- **PostgreSQL**: Version 15+ (installed via WSL/Ubuntu).
 
 
 ## Setup
@@ -15,6 +16,62 @@ After cloning the repository (`https://github.com/Kota117/chirpy`), it is recomm
 go mod tidy
 ```
 
+
+## Database Setup (WSL / Ubuntu)
+Chirpy uses a PostgreSQL database for persistent data storage. The database can be set up and configured inside a WSL environment via the following steps.
+
+### 1. Installation
+Update the system's package list and install PostgreSQL along with its contrib utilities:
+```bash
+sudo apt update
+sudo apt install postgresql postgresql-contrib
+```
+
+Verify the installation and check the version:
+```bash
+psql --version
+```
+
+### 2. Set System Password
+Set a password for the WSL system user `postgres` (the password can be set to `postgres` for simplicity):
+```bash
+sudo passwd postgres
+```
+
+### 3. Start the PostgreSQL Service
+PostgreSQL does not start automatically on WSL. It must started manually when development begins:
+```bash
+sudo service postgresql start
+```
+*Note: To stop the service later, run `sudo service postgresql stop`*
+
+### 4. Create the Database and User
+Access the PostgreSQL interactive terminal (`psql`) as the superuser `postgres`:
+```bash
+sudo -u postgres psql
+```
+Once inside the `postgres=#` prompt, run the following SQL queries:
+
+1. Create the application database:
+    ```bash
+    CREATE DATABASE chirpy;
+    ```
+
+2. Set the database password for the `postgres` user:
+    ```bash
+    ALTER USER postgres WITH PASSWORD 'postgres';
+    ```
+
+3. Verify the connection to the new database:
+    ```bash
+    \c chirpy
+    ```
+    *Note: The prompt should change to chirpy=#*
+
+4. Exit the psql shell:
+    ```bash
+    \q
+    ```
 
 ## Architecture
 Chirpy follows a monolithic structure but maintains a clean separation between the user-facing application, the data API, and administrative tooling by using `/app`, `/api`, and `/admin` namespaces.  
