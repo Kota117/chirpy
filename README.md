@@ -63,13 +63,13 @@ go build -o out && ./out
 
 
 ## Usage
-| Endpoint              | Method | Description                      |
-| --------------------- | ------ | -------------------------------- |
-| `/app/*`              | GET    | Serves static frontend files     |
-| `/api/healthz`        | GET    | Readiness check                  |
-| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars) |
-| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)      |
-| `/admin/reset`        | POST   | Reset hit counter                |
+| Endpoint              | Method | Description                                          |
+| --------------------- | ------ | ---------------------------------------------------- |
+| `/app/*`              | GET    | Serves static frontend files                         |
+| `/api/healthz`        | GET    | Readiness check                                      |
+| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars, profanity filtered) |
+| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)                          |
+| `/admin/reset`        | POST   | Reset hit counter                                    |
 
 
 ## Manually Testing the Server
@@ -155,8 +155,9 @@ Hits reset to 0
 *Note: Sending any non-`POST` HTTP request to `/admin/reset` will result in a `405 Method Not Allowed` response.*
 
 ### Validate a chirp
-Chirps can have a maximum of 140 characters.
+Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`.
 
+#### Valid Chirp
 ```bash
 curl -i -X POST http://localhost:8080/api/validate_chirp \
   -H "Content-Type: application/json" \
@@ -171,9 +172,10 @@ HTTP/1.1 200 OK
 Content-Type: application/json
 ...
 
-{"valid":true}
+{"cleaned_body":"This is a valid chirp"}
 ```
 
+#### Too long
 ```bash
 curl -i -X POST http://localhost:8080/api/validate_chirp \
   -H "Content-Type: application/json" \
@@ -187,4 +189,37 @@ Content-Type: application/json
 ...
 
 {"error":"Chirp is too long"}
+```
+
+#### One bad word
+```bash
+curl -i -X POST http://localhost:8080/api/validate_chirp \
+  -H "Content-Type: application/json" \
+  -d '{"body": "What a kerfuffle situation"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+...
+
+{"cleaned_body":"What a **** situation"}
+```
+*Note: Profanity matching is case-insensitive, so `Kerfuffle`, `KERFUFFLE`, `kerFufFle`, etc. are all replaced. Words are space-separated, so `kerfuffle!`, `kerfuffle,` etc. would **not** be replaced.*
+
+#### Two bad words
+```bash
+curl -i -X POST http://localhost:8080/api/validate_chirp \
+  -H "Content-Type: application/json" \
+  -d '{"body": "This sharbert is a really good fornax"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+...
+
+{"cleaned_body":"This **** is a really good ****"}
 ```
