@@ -8,6 +8,7 @@ A fully-featured social media platform API written in Go.
 - **curl**: For manually testing API endpoints via the terminal.
 - **PostgreSQL**: Version 15+ (installed via WSL/Ubuntu).
 - **Goose**: For running database migrations (`go install github.com/pressly/goose/v3/cmd/goose@latest`).
+- **SQLC**: For generating type-safe Go code from SQL queries (`go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest`).
 
 
 ## Architecture
@@ -29,9 +30,14 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 .
 ├── assets/                  # Static assets like images and logos
 │   └── logo.png
+├── internal/
+│   └── database/            # SQLC-generated Go database code
 ├── sql/                     
-│   └── schema/              # SQL schemas
-│       └── 001_users.sql    # Migration: creates the users table
+│   ├── queries/             # SQLC query definitions
+│   │   └── users.sql
+│   └── schema/              # Goose migration files
+│       └── 001_users.sql
+├── .env                     # Local environment variables (not version-tracked)
 ├── .gitignore               # Disables version-tracking for any included files/folders
 ├── go.mod                   # Go module definition
 ├── handler_metrics.go       # Handler for getting the number of requests since the server was last started
@@ -40,7 +46,8 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 ├── handler_validate.go      # Handler for validating Chirp content
 ├── index.html               # Root HTML file served at http://localhost:8080
 ├── json.go                  # Shared helpers for encoding JSON responses and errors
-└── main.go                  # Entry point for the Go server
+├── main.go                  # Entry point for the Go server
+└── sqlc.yaml                # SQLC configuration
 ```
 
 
@@ -50,6 +57,13 @@ After cloning the repository (`https://github.com/Kota117/chirpy`), it is recomm
 ```bash
 go mod tidy
 ```
+
+
+## Dependencies
+Each dependency can be added via `go get <name>`:
+- `github.com/google/uuid` — UUID generation for database records
+- `github.com/lib/pq` — PostgreSQL driver for `database/sql`
+- `github.com/joho/godotenv` — Loads environment variables from a `.env` file
 
 
 ## Database Setup (WSL / Ubuntu)
@@ -109,6 +123,20 @@ Once inside the `postgres=#` prompt, run the following SQL queries:
     ```
 
 
+## Environment Configuration
+Chirpy reads configuration from a `.env` file in the project root. This file is **not** version-tracked.
+
+Create a `.env` file with the following:
+```bash
+DB_URL="postgres://username:password@localhost:5432/chirpy?sslmode=disable"
+```
+
+Example (Linux/WSL):
+```bash
+DB_URL="postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
+```
+
+
 ## Database Migrations
 Chirpy uses [Goose](https://github.com/pressly/goose) to manage database schema migrations. Migration files live in `sql/schema/` and are plain `.sql` files with special Goose comments.
 
@@ -154,6 +182,15 @@ psql "postgres://postgres:postgres@localhost:5432/chirpy"
 | users	| updated_at	| TIMESTAMP |	NOT NULL         |
 | users	| email	      | TEXT    	| NOT NULL, UNIQUE |
 
+
+## Generating Database Code (SQLC)
+Chirpy uses [SQLC](https://sqlc.dev/) to generate type-safe Go code from SQL queries.
+
+To regenerate the `internal/database` package after modifying queries in `sql/queries/`:
+```bash
+sqlc generate
+```
+*Note: This command should be run from the `root` of the project.*
 
 ## Usage
 | Endpoint              | Method | Description                                          |
