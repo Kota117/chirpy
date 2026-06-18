@@ -17,9 +17,9 @@ func main() {
 	const port string = "8080"
 
 	// "mux" is short for "multiplexer"
-	var mux *http.ServeMux = http.NewServeMux()
+	mux := http.NewServeMux()
 
-	var apiCfg apiConfig = apiConfig{
+	apiCfg := apiConfig{
 		fileserverHits: atomic.Int32{},
 	}
 
@@ -30,7 +30,7 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
 	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 
-	var server *http.Server = &http.Server{
+	server := &http.Server{
 		Addr:    ":" + port,
 		Handler: mux,
 	}

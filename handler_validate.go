@@ -16,14 +16,9 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 		CleanedBody string `json:"cleaned_body"`
 	}
 
-	var (
-		decoder *json.Decoder
-		params  parameters
-		err     error
-	)
-	decoder = json.NewDecoder(r.Body)
-	params = parameters{}
-	err = decoder.Decode(&params)
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err) // HTTP Status Code 500
 		return
@@ -40,7 +35,7 @@ func handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func getCleanedBody(rawText string) string {
-	var badWords map[string]struct{} = map[string]struct{}{
+	badWords := map[string]struct{}{
 		"kerfuffle": {},
 		"sharbert":  {},
 		"fornax":    {},
