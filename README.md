@@ -6,6 +6,7 @@ A fully-featured social media platform API written in Go.
 ## Prerequisites
 - **Go**: Version 1.22+ installed on the local machine.
 - **curl**: For manually testing API endpoints via the terminal.
+- **jq**: For manually testing API endpoints via the terminal.
 - **PostgreSQL**: Version 15+ (installed via WSL/Ubuntu).
 - **Goose**: For running database migrations (`go install github.com/pressly/goose/v3/cmd/goose@latest`).
 - **SQLC**: For generating type-safe Go code from SQL queries (`go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest`).
@@ -24,32 +25,35 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
 - **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
 - **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` in the JSON request body and returns the user's `id`, `created_at`, `updated_at`, and `email`.
+- **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status.
 
 
 ## Project Structure
 ```text
 .
-├── assets/                  # Static assets like images and logos
+├── assets/                   # Static assets like images and logos
 │   └── logo.png
 ├── internal/
-│   └── database/            # SQLC-generated Go database code
+│   └── database/             # SQLC-generated Go database code
 ├── sql/                     
-│   ├── queries/             # SQLC query definitions
+│   ├── queries/              # SQLC query definitions
+│   │   ├── chirps.sql
 │   │   └── users.sql
-│   └── schema/              # Goose migration files
-│       └── 001_users.sql
-├── .env                     # Local environment variables (not version-tracked)
-├── .gitignore               # Disables version-tracking for any included files/folders
-├── go.mod                   # Go module definition
-├── handler_metrics.go       # Handler for getting the number of requests since the server was last started
-├── handler_readiness.go     # Handler for testing if the server is up and ready to receive traffic
-├── handler_reset.go         # Handler for resetting the request counter
-├── handler_validate.go      # Handler for validating Chirp content
-├── handler_users_create.go  # Handler for creating a new user
-├── index.html               # Root HTML file served at http://localhost:8080
-├── json.go                  # Shared helpers for encoding JSON responses and errors
-├── main.go                  # Entry point for the Go server
-└── sqlc.yaml                # SQLC configuration
+│   └── schema/               # Goose migration files
+│       ├── 001_users.sql
+│       └── 002_chirps.sql
+├── .env                      # Local environment variables (not version-tracked)
+├── .gitignore                # Disables version-tracking for any included files/folders
+├── go.mod                    # Go module definition
+├── handler_chirps_create.go  # Handler for creating and validating a new chirp
+├── handler_metrics.go        # Handler for getting the number of requests since the server was last started
+├── handler_readiness.go      # Handler for testing if the server is up and ready to receive traffic
+├── handler_reset.go          # Handler for resetting the request counter
+├── handler_users_create.go   # Handler for creating a new user
+├── index.html                # Root HTML file served at http://localhost:8080
+├── json.go                   # Shared helpers for encoding JSON responses and errors
+├── main.go                   # Entry point for the Go server
+└── sqlc.yaml                 # SQLC configuration
 ```
 
 
@@ -145,7 +149,7 @@ PLATFORM="dev"
 Chirpy uses [Goose](https://github.com/pressly/goose) to manage database schema migrations. Migration files live in `sql/schema/` and are plain `.sql` files with special Goose comments.
 
 ### Running Migrations
-To upgrade the database to new schema, `cd` into the `sql/schema` directory, then run:
+To apply the latest database schema, `cd` into the `sql/schema` directory, then run:
 ```bash
 goose postgres "<connection_string>" up
 ```
@@ -162,7 +166,7 @@ postgres://username:password@host:port/database
 
 Example (Linux/WSL):
 ```bash
-goose postgres "postgres://postgres:postgres@localhost:5432/chirpy" up
+goose postgres "postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable" up
 ```
 
 **Verify the migration applied successfully:**
@@ -173,18 +177,23 @@ psql "<connection_string>"
 
 Example (Linux/WSL):
 ```bash
-psql "postgres://postgres:postgres@localhost:5432/chirpy"
+psql "postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 \dt
 ```
 
 
 ## Current Schema
-| Table |	Column      | Type      |	Constraints      |
-| ----- | ----------- | --------- | ---------------- |
-| users	| id	        | UUID    	| PRIMARY KEY      |
-| users	| created_at	| TIMESTAMP	| NOT NULL         |
-| users	| updated_at	| TIMESTAMP |	NOT NULL         |
-| users	| email	      | TEXT    	| NOT NULL, UNIQUE |
+| Table  |	Column    | Type      |	Constraints                                      |
+| ------ | ---------- | --------- | ------------------------------------------------ |
+| users	 | id	        | UUID    	| PRIMARY KEY                                      |
+| users	 | created_at	| TIMESTAMP	| NOT NULL                                         |
+| users	 | updated_at	| TIMESTAMP |	NOT NULL                                         |
+| users	 | email	    | TEXT    	| NOT NULL, UNIQUE                                 |
+| chirps | id         | UUID      | PRIMARY KEY                                      |
+| chirps | created_at | TIMESTAMP | NOT NULL                                         |
+| chirps | updated_at | TIMESTAMP | NOT NULL                                         |
+| chirps | body       | TEXT      | NOT NULL                                         |
+| chirps | user_id    | UUID      | NOT NULL, REFERENCES users(id) ON DELETE CASCADE |
 
 
 ## Generating Database Code (SQLC)
@@ -197,14 +206,14 @@ sqlc generate
 *Note: This command should be run from the `root` of the project.*
 
 ## Usage
-| Endpoint              | Method | Description                                                   |
-| --------------------- | ------ | ------------------------------------------------------------- |
-| `/app/*`              | GET    | Serves static frontend files                                  |
-| `/api/healthz`        | GET    | Readiness check                                               |
-| `/api/users`          | POST   | Create new user                                               |
-| `/api/validate_chirp` | POST   | Validate a Chirp (max 140 chars, profanity filtered)          |
-| `/admin/metrics`      | GET    | Retrieve hit counter (HTML)                                   |
-| `/admin/reset`        | POST   | Reset hit counter and delete all users (dev environment only) |
+| Endpoint         | Method | Description                                                   |
+| ---------------- | ------ | ------------------------------------------------------------- |
+| `/app/*`         | GET    | Serves static frontend files                                  |
+| `/api/healthz`   | GET    | Readiness check                                               |
+| `/api/users`     | POST   | Create new user                                               |
+| `/api/chirps`    | POST   | Create a new chirp (max 140 chars, profanity filtered)        |
+| `/admin/metrics` | GET    | Retrieve hit counter (HTML)                                   |
+| `/admin/reset`   | POST   | Reset hit counter and delete all users (dev environment only) |
 
 
 ## Running the Server
@@ -221,25 +230,17 @@ go build -o out && ./out
 *Note: Per standard practice, the compiled `out` binary is not version-tracked.*  
 *Note: Go is a compiled language, so the server will not automatically reflect code changes. The server must be stopped with `Ctrl+C`, rebuilt with the above command, and restarted whenever changes are made.*
 
+The terminal window running the server will show a message like this:
+```text
+2026/06/21 10:01:42 Serving files from . on port: 8080
+
+```
+
 
 ## Manually Testing the Server
 While the server is running in one terminal window, the back-end can be manually tested in another terminal window. Additionally, the front-end content can be viewed in a browser at `http://localhost:8080/app/`.  
   
 Admin metrics can be viewed at `http://localhost:8080/admin/metrics`.
-
-### Inspect the contents of index.html
-```bash
-curl -i http://localhost:8080/app/
-```
-* `-i`/`--include`: Tells `curl` to print the HTTP response headers along with any body content.
-*Note: The default HTTP method used by curl is `GET`.*
-
-### Inspect specific media
-```bash
-curl -I http://localhost:8080/app/assets/logo.png
-```
-* `-I`/`--head`: Tells `curl` to print only the HTTP response headers without any body content  
-*Note: To serve additional media assets, place them in the assets/ directory. They will be automatically available at `http://localhost:8080/app/assets/<filename>`.*
 
 ### Check if the server is available
 To check if the server is up and ready to receive traffic (only accepts `GET` requests):
@@ -270,7 +271,62 @@ HTTP/1.1 405 Method Not Allowed
 ...
 ```
 
+### Inspect the contents of index.html
+Requires `curl` to be installed: `sudo apt install curl`.
+```bash
+curl -i http://localhost:8080/app/
+```
+* `-i`/`--include`: Tells `curl` to print the HTTP response headers along with any body content.
+*Note: The default HTTP method used by curl is `GET`.*
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Accept-Ranges: bytes
+Content-Length: 65
+Content-Type: text/html; charset=utf-8
+...
+
+<html>
+  <body>
+    <h1>Welcome to Chirpy</h1>
+  </body>
+</html>
+```
+
+### Inspect specific media
+
+#### Existing media
+```bash
+curl -I http://localhost:8080/app/assets/logo.png
+```
+* `-I`/`--head`: Tells `curl` to print only the HTTP response headers without any body content.  
+*Note: To serve additional media assets, place them in the assets/ directory. They will be automatically available at `http://localhost:8080/app/assets/<filename>`.*
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Accept-Ranges: bytes
+Content-Length: 32010
+Content-Type: image/png
+...
+```
+
+#### Non-existing media
+```bash
+curl -I http://localhost:8080/app/assets/fake_logo.png
+```
+
+Expected response:
+```text
+HTTP/1.1 404 Not Found
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+...
+```
+
 ### Check how many requests have been served
+Metrics can also be viewed in a web browser at `http://localhost:8080/admin/metrics`.
 ```bash
 curl -i http://localhost:8080/admin/metrics
 ```
@@ -291,7 +347,7 @@ Content-Type: text/html
 *Note: the `3` is expected to be any positive integer representing the count of requests served since the server was last started or the request counter was reset.*
 
 ### Reset the request counter and user database
-Only accepts `POST` requests. Only accessible if `PLATFORM=dev`:
+Only accepts `POST` requests. Only accessible if `PLATFORM=dev`, otherwise returns `403 Forbidden`.
 
 ```bash
 curl -i -X POST http://localhost:8080/admin/reset
@@ -299,37 +355,105 @@ curl -i -X POST http://localhost:8080/admin/reset
 
 Expected response:
 ```text
+HTTP/1.1 200 OK
+...
+Content-Type: text/plain; charset=utf-8
+
 Hits reset to 0 and database reset to initial state.
 ```
-
 *Note: Sending any non-`POST` HTTP request to `/admin/reset` will result in a `405 Method Not Allowed` response.*
 
-### Validate a chirp
-Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`.
-
-#### Valid Chirp
+### Create new user
+It is helpful to always reset the database before testing so that any previous tests won't affect the current test.
 ```bash
-curl -i -X POST http://localhost:8080/api/validate_chirp \
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -i -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"body": "This is a valid chirp"}'
+  -d '{"email": "user@example.com"}'
 ```
+* `-s`/`--silent`: Suppresses the progress meter.
+* `> /dev/null`: Discards the response body.
 * `-H`/`--header`: Sets a request header.
 * `-d`/`--data`: Sets the request body (the "data"). If used, `curl` will automatically switch to use the `POST` method if one wasn't specified explicitly with `-X`.
 
 Expected response:
 ```text
-HTTP/1.1 200 OK
+HTTP/1.1 201 Created
 Content-Type: application/json
 ...
 
-{"cleaned_body":"This is a valid chirp"}
+{
+  "id":"4d7d97a9-4312-4078-9604-cd53f6f9fe72",
+  "created_at":"2026-06-21T10:13:25.398539Z",
+  "updated_at":"2026-06-21T10:13:25.398539Z",
+  "email":"user@example.com"
+}
+```
+*Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run.*
+
+### Create a chirp
+Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`. There must exist a `user` with a `uuid` that is used to create a new chirp.
+
+#### Valid chirp
+Requires `jq` to be installed: `sudo apt install jq`. First resets the database, then creates a `user`, and then uses the generated `user.id` in the `chirp` creation; this ensures the `user` exists and the `user_id` is valid.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}' | jq -r '.id')
+
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Hello, World!", "user_id": "'"$USER_ID"'"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+...
+
+{
+  "id":"50502fa1-e4f1-4ea3-bddb-8ae12af483dc",
+  "created_at":"2026-06-21T10:15:19.507664Z",
+  "updated_at":"2026-06-21T10:15:19.507664Z",
+  "body":"Hello, World!",
+  "user_id":"af9bfff3-bf2f-40d5-86b9-f58428b31b3f"
+}
+```
+*Note: The `id` field and the `user_id` will be random UUIDs. The `created_at` and `updated_at` fields should show around when the command was run.*
+
+#### Invalid user_id
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Hello, world!", "user_id": "Not a valid uuid of an existing user"}'
+```
+
+Current response:
+```text
+HTTP/1.1 500 Internal Server Error
+Content-Type: application/json
+...
+
+{"error":"Couldn't decode parameters"}
 ```
 
 #### Too long
 ```bash
-curl -i -X POST http://localhost:8080/api/validate_chirp \
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"body": "lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut pharetra finibus enim eu mattis. Phasellus malesuada nibh at lacus fringilla nam."}'
+  -d '{"email": "user@example.com"}' | jq -r '.id')
+
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut pharetra finibus enim eu mattis. Phasellus malesuada nibh at lacus fringilla nam.", "user_id": "'"$USER_ID"'"}'
 ```
 
 Expected response:
@@ -343,42 +467,15 @@ Content-Type: application/json
 
 #### One bad word
 ```bash
-curl -i -X POST http://localhost:8080/api/validate_chirp \
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"body": "What a kerfuffle situation"}'
-```
+  -d '{"email": "user@example.com"}' | jq -r '.id')
 
-Expected response:
-```text
-HTTP/1.1 200 OK
-Content-Type: application/json
-...
-
-{"cleaned_body":"What a **** situation"}
-```
-*Note: Profanity matching is case-insensitive, so `Kerfuffle`, `KERFUFFLE`, `kerFufFle`, etc. are all replaced. Words are space-separated, so `kerfuffle!`, `kerfuffle,` etc. would **not** be replaced.*
-
-#### Two bad words
-```bash
-curl -i -X POST http://localhost:8080/api/validate_chirp \
+curl -i -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "This sharbert is a really good fornax"}'
-```
-
-Expected response:
-```text
-HTTP/1.1 200 OK
-Content-Type: application/json
-...
-
-{"cleaned_body":"This **** is a really good ****"}
-```
-
-### Create new user
-```bash
-curl -i -X POST http://localhost:8080/api/users \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}'
+  -d '{"body": "What a kerfuffle situation", "user_id": "'"$USER_ID"'"}'
 ```
 
 Expected response:
@@ -388,10 +485,39 @@ Content-Type: application/json
 ...
 
 {
-  "id": "50746277-23c6-4d85-a890-564c0044c2fb",
-  "created_at": "2021-07-07T00:00:00Z",
-  "updated_at": "2021-07-07T00:00:00Z",
-  "email": "user@example.com"
+  "id":"fe3cdbb3-7102-42f9-890e-b6371ef69694",
+  "created_at":"2026-06-21T10:55:19.566341Z",
+  "updated_at":"2026-06-21T10:55:19.566341Z",
+  "body":"What a **** situation",
+  "user_id":"f2dc2a8d-92d4-4a02-a65c-1eae0f7f54ea"
 }
 ```
-*Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run.*
+*Note: Profanity matching is case-insensitive, so `Kerfuffle`, `KERFUFFLE`, `kerFufFle`, etc. are all replaced. Words are space-separated, so `kerfuffle!`, `kerfuffle,` etc. would **not** be replaced.*
+
+#### Multiple bad words
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}' | jq -r '.id')
+
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "This sharbert is a really good fornax", "user_id": "'"$USER_ID"'"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+...
+
+{
+  "id":"97c53c76-94c8-4ddf-a06a-279d86740fba",
+  "created_at":"2026-06-21T10:56:07.641691Z",
+  "updated_at":"2026-06-21T10:56:07.641691Z",
+  "body":"This **** is a really good ****",
+  "user_id":"43b7c34b-3bea-432b-bc92-ac5ff9df3f26"
+}
+```
