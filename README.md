@@ -27,6 +27,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` in the JSON request body and returns the user's `id`, `created_at`, `updated_at`, and `email`.
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status.
 - **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
+- **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
 
 
 ## Project Structure
@@ -47,7 +48,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 ├── .gitignore                # Disables version-tracking for any included files/folders
 ├── go.mod                    # Go module definition
 ├── handler_chirps_create.go  # Handler for creating and validating a new chirp
-├── handler_chirps_get.go     # Handler for retrieving all chirps
+├── handler_chirps_get.go     # Handler for retrieving chirps (all or by uuid)
 ├── handler_metrics.go        # Handler for getting the number of requests since the server was last started
 ├── handler_readiness.go      # Handler for testing if the server is up and ready to receive traffic
 ├── handler_reset.go          # Handler for resetting the request counter
@@ -208,15 +209,16 @@ sqlc generate
 *Note: This command should be run from the `root` of the project.*
 
 ## Usage
-| Endpoint         | Method | Description                                                   |
-| ---------------- | ------ | ------------------------------------------------------------- |
-| `/app/*`         | GET    | Serves static frontend files                                  |
-| `/api/healthz`   | GET    | Readiness check                                               |
-| `/api/users`     | POST   | Create new user                                               |
-| `/api/chirps`    | POST   | Create a new chirp (max 140 chars, profanity filtered)        |
-| `/api/chirps`    | GET    | Retrieve all chirps (sorted ascending by creation time)       |
-| `/admin/metrics` | GET    | Retrieve hit counter (HTML)                                   |
-| `/admin/reset`   | POST   | Reset hit counter and delete all users (dev environment only) |
+| Endpoint                | Method | Description                                                   |
+| ----------------------- | ------ | ------------------------------------------------------------- |
+| `/app/*`                | GET    | Serves static frontend files                                  |
+| `/api/healthz`          | GET    | Readiness check                                               |
+| `/api/users`            | POST   | Create new user                                               |
+| `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)        |
+| `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)       |
+| `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)      |
+| `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                   |
+| `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only) |
 
 
 ## Running the Server
@@ -568,4 +570,60 @@ Content-Type: application/json
     "user_id":"36944d8c-f7af-40e1-95d2-4e962ed19e74"
   }
 ]
+```
+
+### Retrieve a single chirp
+
+#### Retrieving a valid chirp
+First resets the database, creates a user, creates a chirp, and then uses the generated chirp's ID to retrieve only that chirp.
+
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}' | jq -r '.id')
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Hello, World!", "user_id": "'"$USER_ID"'"}' > /dev/null
+
+CHIRP_ID=$(curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "This is a single targeted chirp!", "user_id": "'"$USER_ID"'"}' | jq -r '.id')
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "This is a more recent chirp than the target!", "user_id": "'"$USER_ID"'"}' > /dev/null
+
+curl -i http://localhost:8080/api/chirps/$CHIRP_ID
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+...
+
+{
+  "id":"5d6729a7-944b-421d-8580-7501c88dc0e0",
+  "created_at":"2026-06-22T09:18:19.923728Z",
+  "updated_at":"2026-06-22T09:18:19.923728Z",
+  "body":"This is a single targeted chirp!",
+  "user_id":"a7d725b4-4047-4b46-ad95-b27b824b05d1"
+}
+```
+
+#### Retrieving a non-existing chirp ID
+```bash
+curl -i http://localhost:8080/api/chirps/00000000-0000-0000-0000-000000000000
+```
+
+Expected response:
+```text
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+...
+
+{"error":"Couldn't get chirp"}
 ```
