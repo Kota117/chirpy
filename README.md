@@ -26,6 +26,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
 - **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` in the JSON request body and returns the user's `id`, `created_at`, `updated_at`, and `email`.
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status.
+- **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
 
 
 ## Project Structure
@@ -46,6 +47,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 ├── .gitignore                # Disables version-tracking for any included files/folders
 ├── go.mod                    # Go module definition
 ├── handler_chirps_create.go  # Handler for creating and validating a new chirp
+├── handler_chirps_get.go     # Handler for retrieving all chirps
 ├── handler_metrics.go        # Handler for getting the number of requests since the server was last started
 ├── handler_readiness.go      # Handler for testing if the server is up and ready to receive traffic
 ├── handler_reset.go          # Handler for resetting the request counter
@@ -212,6 +214,7 @@ sqlc generate
 | `/api/healthz`   | GET    | Readiness check                                               |
 | `/api/users`     | POST   | Create new user                                               |
 | `/api/chirps`    | POST   | Create a new chirp (max 140 chars, profanity filtered)        |
+| `/api/chirps`    | GET    | Retrieve all chirps (sorted ascending by creation time)       |
 | `/admin/metrics` | GET    | Retrieve hit counter (HTML)                                   |
 | `/admin/reset`   | POST   | Reset hit counter and delete all users (dev environment only) |
 
@@ -520,4 +523,49 @@ Content-Type: application/json
   "body":"This **** is a really good ****",
   "user_id":"43b7c34b-3bea-432b-bc92-ac5ff9df3f26"
 }
+```
+
+### Retrieve all chirps
+Retrieves a list of all chirps in the database, ordered chronologically. First resets the database, creates a user, creates two chirps, and then retrieves all chirps.
+
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}' | jq -r '.id')
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Hello, World!", "user_id": "'"$USER_ID"'"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -d '{"body": "This is another chirp!", "user_id": "'"$USER_ID"'"}' > /dev/null
+
+curl -i http://localhost:8080/api/chirps
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+...
+
+[
+  {
+    "id":"4cb05247-fa8e-47fd-baaa-eb21634ccc7a",
+    "created_at":"2026-06-22T08:57:01.890578Z",
+    "updated_at":"2026-06-22T08:57:01.890578Z",
+    "body":"Hello, World!",
+    "user_id":"36944d8c-f7af-40e1-95d2-4e962ed19e74"
+  },
+  {
+    "id":"f11f7744-700d-4693-93ce-e10be2f10a0d",
+    "created_at":"2026-06-22T08:57:01.899584Z",
+    "updated_at":"2026-06-22T08:57:01.899584Z",
+    "body":"This is another chirp!",
+    "user_id":"36944d8c-f7af-40e1-95d2-4e962ed19e74"
+  }
+]
 ```
