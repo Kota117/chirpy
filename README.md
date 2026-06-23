@@ -24,10 +24,26 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Request Metrics**: Tracks the number of file server hits using an `atomic.Int32` counter. Accessible via the `GET /admin/metrics` endpoint.  
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
 - **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
-- **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` in the JSON request body and returns the user's `id`, `created_at`, `updated_at`, and `email`.
+- **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` and `password` in the JSON request body. The password is hashed with Argon2 before storage. Returns the user's `id`, `created_at`, `updated_at`, and `email` (never the hashed password).
+- **User Login**: Authenticates a user via `POST /api/login`. Accepts an `email` and `password`. Returns the user resource on success, or `401 Unauthorized` with the message "Incorrect email or password" if the email lookup or password comparison fails.
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status.
 - **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
+
+
+## Security Notes
+
+### Passwords are never stored in plain text
+User passwords are hashed using [Argon2](https://en.wikipedia.org/wiki/Argon2) (via the `github.com/alexedwards/argon2id` library) before being written to the database. Hashing is a one-way function: even if the database is compromised, the original passwords cannot be recovered from the stored hashes.
+
+### Hashed passwords are never returned in responses
+The `User` struct tags the password field with `json:"-"`, ensuring it is excluded from all JSON responses. The API never echoes back password data, hashed or otherwise.
+
+### Login errors are intentionally vague
+The `POST /api/login` endpoint returns the same `401 Unauthorized` message, "Incorrect email or password", whether the email doesn't exist OR the password is wrong. This prevents attackers from discovering which emails are registered (an enumeration attack).
+
+### Raw passwords in requests rely on HTTPS
+Passwords are sent as plain text in the request body. This is only safe because production traffic is encrypted end-to-end with HTTPS/TLS. Never run this API over plain HTTP in production.
 
 
 ## Project Structure
@@ -36,6 +52,9 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 ├── assets/                   # Static assets like images and logos
 │   └── logo.png
 ├── internal/
+│   ├── auth/                 # Password hashing and comparison helpers
+│   │   ├── auth.go
+│   │   └── auth_test.go
 │   └── database/             # SQLC-generated Go database code
 ├── sql/                     
 │   ├── queries/              # SQLC query definitions
@@ -43,12 +62,14 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 │   │   └── users.sql
 │   └── schema/               # Goose migration files
 │       ├── 001_users.sql
-│       └── 002_chirps.sql
+│       ├── 002_chirps.sql
+│       └── 003_password.sql
 ├── .env                      # Local environment variables (not version-tracked)
 ├── .gitignore                # Disables version-tracking for any included files/folders
 ├── go.mod                    # Go module definition
 ├── handler_chirps_create.go  # Handler for creating and validating a new chirp
 ├── handler_chirps_get.go     # Handler for retrieving chirps (all or by uuid)
+├── handler_login.go          # Handler for authenticating a user
 ├── handler_metrics.go        # Handler for getting the number of requests since the server was last started
 ├── handler_readiness.go      # Handler for testing if the server is up and ready to receive traffic
 ├── handler_reset.go          # Handler for resetting the request counter
@@ -73,6 +94,7 @@ Each dependency can be added via `go get <name>`:
 - `github.com/google/uuid` — UUID generation for database records
 - `github.com/lib/pq` — PostgreSQL driver for `database/sql`
 - `github.com/joho/godotenv` — Loads environment variables from a `.env` file
+- `github.com/alexedwards/argon2id` — Argon2 password hashing wrapper
 
 
 ## Database Setup (WSL / Ubuntu)
@@ -186,17 +208,18 @@ psql "postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 
 
 ## Current Schema
-| Table  |	Column    | Type      |	Constraints                                      |
-| ------ | ---------- | --------- | ------------------------------------------------ |
-| users	 | id	        | UUID    	| PRIMARY KEY                                      |
-| users	 | created_at	| TIMESTAMP	| NOT NULL                                         |
-| users	 | updated_at	| TIMESTAMP |	NOT NULL                                         |
-| users	 | email	    | TEXT    	| NOT NULL, UNIQUE                                 |
-| chirps | id         | UUID      | PRIMARY KEY                                      |
-| chirps | created_at | TIMESTAMP | NOT NULL                                         |
-| chirps | updated_at | TIMESTAMP | NOT NULL                                         |
-| chirps | body       | TEXT      | NOT NULL                                         |
-| chirps | user_id    | UUID      | NOT NULL, REFERENCES users(id) ON DELETE CASCADE |
+| Table  | Column          | Type      | Constraints                                      |
+| ------ | --------------- | --------- | ------------------------------------------------ |
+| users  | id              | UUID      | PRIMARY KEY                                      |
+| users  | created_at      | TIMESTAMP | NOT NULL                                         |
+| users  | updated_at      | TIMESTAMP | NOT NULL                                         |
+| users  | email           | TEXT      | NOT NULL, UNIQUE                                 |
+| users  | hashed_password | TEXT      | NOT NULL, DEFAULT 'unset'                        |
+| chirps | id              | UUID      | PRIMARY KEY                                      |
+| chirps | created_at      | TIMESTAMP | NOT NULL                                         |
+| chirps | updated_at      | TIMESTAMP | NOT NULL                                         |
+| chirps | body            | TEXT      | NOT NULL                                         |
+| chirps | user_id         | UUID      | NOT NULL, REFERENCES users(id) ON DELETE CASCADE |
 
 
 ## Generating Database Code (SQLC)
@@ -214,6 +237,7 @@ sqlc generate
 | `/app/*`                | GET    | Serves static frontend files                                  |
 | `/api/healthz`          | GET    | Readiness check                                               |
 | `/api/users`            | POST   | Create new user                                               |
+| `/api/login`            | POST   | Authenticate a user with email and password                   |
 | `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)        |
 | `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)       |
 | `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)      |
@@ -375,7 +399,7 @@ curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
 curl -i -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}'
+  -d '{"email": "user@example.com", "password": "1234"}'
 ```
 * `-s`/`--silent`: Suppresses the progress meter.
 * `> /dev/null`: Discards the response body.
@@ -396,6 +420,59 @@ Content-Type: application/json
 }
 ```
 *Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run.*
+
+### Login
+
+#### Correct password
+First reset the database, create a user, then log in with the same credentials.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+curl -i -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+...
+
+{
+  "id":"83f11307-1af5-4ccb-83e9-6fa1fb2a6bde",
+  "created_at":"2026-06-23T08:10:43.364036Z",
+  "updated_at":"2026-06-23T08:10:43.364036Z",
+  "email":"user@example.com"
+}
+```
+
+#### Incorrect password
+First reset the database, create a user, then log in with the wrong password credentials.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+curl -i -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "12345"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+...
+
+{"error":"Incorrect email or password"}
+```
 
 ### Create a chirp
 Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`. There must exist a `user` with a `uuid` that is used to create a new chirp.
