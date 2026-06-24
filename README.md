@@ -10,6 +10,7 @@ A fully-featured social media platform API written in Go.
 - **PostgreSQL**: Version 15+ (installed via WSL/Ubuntu).
 - **Goose**: For running database migrations (`go install github.com/pressly/goose/v3/cmd/goose@latest`).
 - **SQLC**: For generating type-safe Go code from SQL queries (`go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest`).
+- **JWT**: JSON Web Token (JWT, pronounced 'jot') creation and validation (`github.com/golang-jwt/jwt/v5`).
 
 
 ## Architecture
@@ -45,6 +46,9 @@ The `POST /api/login` endpoint returns the same `401 Unauthorized` message, "Inc
 ### Raw passwords in requests rely on HTTPS
 Passwords are sent as plain text in the request body. This is only safe because production traffic is encrypted end-to-end with HTTPS/TLS. Never run this API over plain HTTP in production.
 
+### JWT
+JWTs are signed, not encrypted — The payload is Base64-encoded and readable by anyone. Never store sensitive data (like passwords) in a JWT. The signature only guarantees the token hasn't been tampered with.
+
 
 ## Project Structure
 ```text
@@ -52,7 +56,7 @@ Passwords are sent as plain text in the request body. This is only safe because 
 ├── assets/                   # Static assets like images and logos
 │   └── logo.png
 ├── internal/
-│   ├── auth/                 # Password hashing and comparison helpers
+│   ├── auth/                 # Password hashing & comparison and JWT creation & validation helpers
 │   │   ├── auth.go
 │   │   └── auth_test.go
 │   └── database/             # SQLC-generated Go database code
