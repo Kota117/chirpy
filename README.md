@@ -10,7 +10,6 @@ A fully-featured social media platform API written in Go.
 - **PostgreSQL**: Version 15+ (installed via WSL/Ubuntu).
 - **Goose**: For running database migrations (`go install github.com/pressly/goose/v3/cmd/goose@latest`).
 - **SQLC**: For generating type-safe Go code from SQL queries (`go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest`).
-- **JWT**: JSON Web Token (JWT, pronounced 'jot') creation and validation (`github.com/golang-jwt/jwt/v5`).
 
 
 ## Architecture
@@ -26,8 +25,8 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
 - **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
 - **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` and `password` in the JSON request body. The password is hashed with Argon2 before storage. Returns the user's `id`, `created_at`, `updated_at`, and `email` (never the hashed password).
-- **User Login**: Authenticates a user via `POST /api/login`. Accepts an `email` and `password`. Returns the user resource on success, or `401 Unauthorized` with the message "Incorrect email or password" if the email lookup or password comparison fails.
-- **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status.
+- **User Login**: Authenticates a user via `POST /api/login`. Accepts an `email` and `password`. Returns the user resource and a signed JWT token on success, or `401 Unauthorized` with the message "Incorrect email or password" if the email lookup or password comparison fails.
+- **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status. Requires a valid JWT in the `Authorization: Bearer <token>` header. The user ID is derived from the token, not the request body. Returns `401 Unauthorized` if the JWT is missing or invalid.
 - **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
 
@@ -99,6 +98,7 @@ Each dependency can be added via `go get <name>`:
 - `github.com/lib/pq` — PostgreSQL driver for `database/sql`
 - `github.com/joho/godotenv` — Loads environment variables from a `.env` file
 - `github.com/alexedwards/argon2id` — Argon2 password hashing wrapper
+- `github.com/golang-jwt/jwt/v5` — JWT creation and validation
 
 
 ## Database Setup (WSL / Ubuntu)
@@ -165,13 +165,17 @@ Create a `.env` file with the following:
 ```bash
 DB_URL="postgres://username:password@localhost:5432/chirpy?sslmode=disable"
 PLATFORM="<dev|prod>"
+JWT_SECRET="your-generated-secret-here"
 ```
+*Note: Generate a JWT secret with: `openssl rand -base64 64`*
 
 Example (Linux/WSL):
 ```bash
 DB_URL="postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 PLATFORM="dev"
+JWT_SECRET="Rvn5iIEn+4CdTS9u7QEDH5Z6sttc73hsF+jqAKDtL90AY2lMHS5obnk1FL9Lvk75Iqr7fpVxIyXlAj6Km7de9Q=="
 ```
+*Note: This `JWT_SECRET` is just an example of running the suggested command and is not the secret on this machine.*
 
 
 ## Database Migrations
@@ -276,7 +280,7 @@ While the server is running in one terminal window, the back-end can be manually
 Admin metrics can be viewed at `http://localhost:8080/admin/metrics`.
 
 ### Check if the server is available
-To check if the server is up and ready to receive traffic (only accepts `GET` requests):
+Requires `curl` to be installed: `sudo apt install curl`. To check if the server is up and ready to receive traffic (only accepts `GET` requests):
 
 ```bash
 curl -i http://localhost:8080/api/healthz
@@ -286,10 +290,12 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
-...
+Date: Wed, 24 Jun 2026 22:01:25 GMT
+Content-Length: 3
 
 OK
 ```
+*Note: The `Date` shows from when the request originated.*
 
 The server will reject any HTTP method other than `GET` at this endpoint:
 
@@ -301,11 +307,16 @@ curl -i -X POST http://localhost:8080/api/healthz
 Expected response:
 ```text
 HTTP/1.1 405 Method Not Allowed
-...
+Allow: GET, HEAD
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+Date: Wed, 24 Jun 2026 22:02:48 GMT
+Content-Length: 19
+
+Method Not Allowed
 ```
 
 ### Inspect the contents of index.html
-Requires `curl` to be installed: `sudo apt install curl`.
 ```bash
 curl -i http://localhost:8080/app/
 ```
@@ -318,7 +329,8 @@ HTTP/1.1 200 OK
 Accept-Ranges: bytes
 Content-Length: 65
 Content-Type: text/html; charset=utf-8
-...
+Last-Modified: Tue, 16 Jun 2026 16:19:19 GMT
+Date: Wed, 24 Jun 2026 22:03:34 GMT
 
 <html>
   <body>
@@ -342,7 +354,9 @@ HTTP/1.1 200 OK
 Accept-Ranges: bytes
 Content-Length: 32010
 Content-Type: image/png
-...
+Last-Modified: Tue, 16 Jun 2026 16:40:30 GMT
+Date: Wed, 24 Jun 2026 22:04:00 GMT
+
 ```
 
 #### Non-existing media
@@ -355,7 +369,9 @@ Expected response:
 HTTP/1.1 404 Not Found
 Content-Type: text/plain; charset=utf-8
 X-Content-Type-Options: nosniff
-...
+Date: Wed, 24 Jun 2026 22:04:17 GMT
+Content-Length: 19
+
 ```
 
 ### Check how many requests have been served
@@ -368,7 +384,9 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: text/html
-...
+Date: Wed, 24 Jun 2026 22:04:35 GMT
+Content-Length: 114
+
 
 <html>
   <body>
@@ -389,7 +407,8 @@ curl -i -X POST http://localhost:8080/admin/reset
 Expected response:
 ```text
 HTTP/1.1 200 OK
-...
+Date: Wed, 24 Jun 2026 22:04:58 GMT
+Content-Length: 53
 Content-Type: text/plain; charset=utf-8
 
 Hits reset to 0 and database reset to initial state.
@@ -414,16 +433,18 @@ Expected response:
 ```text
 HTTP/1.1 201 Created
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:05:19 GMT
+Content-Length: 158
 
 {
-  "id":"4d7d97a9-4312-4078-9604-cd53f6f9fe72",
-  "created_at":"2026-06-21T10:13:25.398539Z",
-  "updated_at":"2026-06-21T10:13:25.398539Z",
+  "id":"8dc99490-ce27-4e16-b0ca-59c96d5388b6",
+  "created_at":"2026-06-24T16:05:19.421934Z",
+  "updated_at":"2026-06-24T16:05:19.421934Z",
   "email":"user@example.com"
 }
 ```
-*Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run.*
+*Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run (in local time).*
+*Note: The returned JSON will likely be collapsed. The response is prettified here for clarity.*
 
 ### Login
 
@@ -445,13 +466,15 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:06:13 GMT
+Content-Length: 386
 
 {
-  "id":"83f11307-1af5-4ccb-83e9-6fa1fb2a6bde",
-  "created_at":"2026-06-23T08:10:43.364036Z",
-  "updated_at":"2026-06-23T08:10:43.364036Z",
-  "email":"user@example.com"
+  "id":"55defd5f-2642-4c84-b621-dd777a7b405d",
+  "created_at":"2026-06-24T16:06:13.886916Z",
+  "updated_at":"2026-06-24T16:06:13.886916Z",
+  "email":"user@example.com",
+  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiNTVkZWZkNWYtMjY0Mi00Yzg0LWI2MjEtZGQ3NzdhN2I0MDVkIiwiZXhwIjoxNzgyMzQyMzczLCJpYXQiOjE3ODIzMzg3NzN9.JuOQnG39LzzxKbrmGBRrcSj6eWCe6f1Vjxn8i-yUxIk"
 }
 ```
 
@@ -473,138 +496,171 @@ Expected response:
 ```text
 HTTP/1.1 401 Unauthorized
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:07:36 GMT
+Content-Length: 39
 
 {"error":"Incorrect email or password"}
 ```
 
 ### Create a chirp
-Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`. There must exist a `user` with a `uuid` that is used to create a new chirp.
+Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`. The user is identified by the JWT, so the user must exist and be logged in.
 
 #### Valid chirp
-Requires `jq` to be installed: `sudo apt install jq`. First resets the database, then creates a `user`, and then uses the generated `user.id` in the `chirp` creation; this ensures the `user` exists and the `user_id` is valid.
+Requires `jq` to be installed: `sudo apt install jq`. First resets the database, then creates a `user`, then logs into that user, and then creates the `chirp`; this ensures the `user` exists and there is a valid `token` used.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
-USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}' | jq -r '.id')
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
 
 curl -i -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "Hello, World!", "user_id": "'"$USER_ID"'"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}'
 ```
 
 Expected response:
 ```text
 HTTP/1.1 201 Created
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:12:09 GMT
+Content-Length: 203
 
 {
-  "id":"50502fa1-e4f1-4ea3-bddb-8ae12af483dc",
-  "created_at":"2026-06-21T10:15:19.507664Z",
-  "updated_at":"2026-06-21T10:15:19.507664Z",
+  "id":"dba19cca-3f84-4b0a-ae97-aefad1e54d67",
+  "created_at":"2026-06-24T16:12:09.058969Z",
+  "updated_at":"2026-06-24T16:12:09.058969Z",
   "body":"Hello, World!",
-  "user_id":"af9bfff3-bf2f-40d5-86b9-f58428b31b3f"
+  "user_id":"5dc8097c-27af-4e07-8486-cd3a2cbcfef5"
 }
 ```
-*Note: The `id` field and the `user_id` will be random UUIDs. The `created_at` and `updated_at` fields should show around when the command was run.*
+*Note: The `user_id` field will be a random UUID correlated with the currently logged in user.*
 
-#### Invalid user_id
+#### Invalid token
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN="not a valid token"
+
 curl -i -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "Hello, world!", "user_id": "Not a valid uuid of an existing user"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}'
 ```
 
-Current response:
+Expected response:
 ```text
-HTTP/1.1 500 Internal Server Error
+HTTP/1.1 401 Unauthorized
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:27:39 GMT
+Content-Length: 33
 
-{"error":"Couldn't decode parameters"}
+{"error":"Couldn't validate JWT"}
 ```
 
-#### Too long
+#### Too long chirp
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
-USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}' | jq -r '.id')
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
 
 curl -i -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut pharetra finibus enim eu mattis. Phasellus malesuada nibh at lacus fringilla nam.", "user_id": "'"$USER_ID"'"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut pharetra finibus enim eu mattis. Phasellus malesuada nibh at lacus fringilla nam."}'
 ```
 
 Expected response:
 ```text
 HTTP/1.1 400 Bad Request
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:15:08 GMT
+Content-Length: 29
 
 {"error":"Chirp is too long"}
 ```
 
-#### One bad word
+#### One bad word in chirp
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
-USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}' | jq -r '.id')
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
 
 curl -i -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "What a kerfuffle situation", "user_id": "'"$USER_ID"'"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "What a kerfuffle situation"}'
 ```
 
 Expected response:
 ```text
 HTTP/1.1 201 Created
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:15:43 GMT
+Content-Length: 211
 
 {
-  "id":"fe3cdbb3-7102-42f9-890e-b6371ef69694",
-  "created_at":"2026-06-21T10:55:19.566341Z",
-  "updated_at":"2026-06-21T10:55:19.566341Z",
+  "id":"edf06cdf-0928-4670-8745-ab51607daac4",
+  "created_at":"2026-06-24T16:15:43.779179Z",
+  "updated_at":"2026-06-24T16:15:43.779179Z",
   "body":"What a **** situation",
-  "user_id":"f2dc2a8d-92d4-4a02-a65c-1eae0f7f54ea"
+  "user_id":"3372c75f-e78f-40e7-8f3c-87a234897f6b"
 }
 ```
 *Note: Profanity matching is case-insensitive, so `Kerfuffle`, `KERFUFFLE`, `kerFufFle`, etc. are all replaced. Words are space-separated, so `kerfuffle!`, `kerfuffle,` etc. would **not** be replaced.*
 
-#### Multiple bad words
+#### Multiple bad words in chirp
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
-USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}' | jq -r '.id')
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
 
 curl -i -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "This sharbert is a really good fornax", "user_id": "'"$USER_ID"'"}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "What in the sharbert is fornax"}'
 ```
 
 Expected response:
 ```text
 HTTP/1.1 201 Created
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:17:04 GMT
+Content-Length: 212
 
 {
-  "id":"97c53c76-94c8-4ddf-a06a-279d86740fba",
-  "created_at":"2026-06-21T10:56:07.641691Z",
-  "updated_at":"2026-06-21T10:56:07.641691Z",
-  "body":"This **** is a really good ****",
-  "user_id":"43b7c34b-3bea-432b-bc92-ac5ff9df3f26"
+  "id":"785cd563-07c3-43e6-bef6-2296181c5211",
+  "created_at":"2026-06-24T16:17:04.11606Z",
+  "updated_at":"2026-06-24T16:17:04.11606Z",
+  "body":"What in the **** is ****",
+  "user_id":"3b951e56-f159-4f00-9863-a40a8c585532"
 }
 ```
 
@@ -614,17 +670,23 @@ Retrieves a list of all chirps in the database, ordered chronologically. First r
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
-USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}' | jq -r '.id')
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
 
 curl -s -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "Hello, World!", "user_id": "'"$USER_ID"'"}' > /dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}' > /dev/null
 
 curl -s -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "This is another chirp!", "user_id": "'"$USER_ID"'"}' > /dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "This is another chirp!"}' > /dev/null
 
 curl -i http://localhost:8080/api/chirps
 ```
@@ -633,49 +695,58 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:18:52 GMT
+Content-Length: 416
 
 [
   {
-    "id":"4cb05247-fa8e-47fd-baaa-eb21634ccc7a",
-    "created_at":"2026-06-22T08:57:01.890578Z",
-    "updated_at":"2026-06-22T08:57:01.890578Z",
+    "id":"978e160a-0a20-4a53-9fcc-9538b92c2565",
+    "created_at":"2026-06-24T16:18:52.023194Z",
+    "updated_at":"2026-06-24T16:18:52.023194Z",
     "body":"Hello, World!",
-    "user_id":"36944d8c-f7af-40e1-95d2-4e962ed19e74"
+    "user_id":"bc5b80e2-f3d5-40ef-82ea-bdf641c3197c"
   },
   {
-    "id":"f11f7744-700d-4693-93ce-e10be2f10a0d",
-    "created_at":"2026-06-22T08:57:01.899584Z",
-    "updated_at":"2026-06-22T08:57:01.899584Z",
+    "id":"1aaf0a09-5a5a-4f87-bef8-57ef4168e353",
+    "created_at":"2026-06-24T16:18:52.03205Z",
+    "updated_at":"2026-06-24T16:18:52.03205Z",
     "body":"This is another chirp!",
-    "user_id":"36944d8c-f7af-40e1-95d2-4e962ed19e74"
+    "user_id":"bc5b80e2-f3d5-40ef-82ea-bdf641c3197c"
   }
 ]
 ```
+*Note: Notice that both chirps' `user_id` are the same because the same user posted each one using one unique token.*
 
 ### Retrieve a single chirp
 
 #### Retrieving a valid chirp
-First resets the database, creates a user, creates a chirp, and then uses the generated chirp's ID to retrieve only that chirp.
+First resets the database, creates a user, creates some chirps, and then uses a generated chirp's ID to retrieve only that specific chirp.
 
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
-USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+curl -s -X POST http://localhost:8080/api/users \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}' | jq -r '.id')
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
 
 curl -s -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "Hello, World!", "user_id": "'"$USER_ID"'"}' > /dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}' > /dev/null
 
 CHIRP_ID=$(curl -s -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "This is a single targeted chirp!", "user_id": "'"$USER_ID"'"}' | jq -r '.id')
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "This is a single targeted chirp!"}' | jq -r '.id')
 
 curl -s -X POST http://localhost:8080/api/chirps \
   -H "Content-Type: application/json" \
-  -d '{"body": "This is a more recent chirp than the target!", "user_id": "'"$USER_ID"'"}' > /dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "This is a more recent chirp than the target!"}' > /dev/null
 
 curl -i http://localhost:8080/api/chirps/$CHIRP_ID
 ```
@@ -684,14 +755,15 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:24:08 GMT
+Content-Length: 222
 
 {
-  "id":"5d6729a7-944b-421d-8580-7501c88dc0e0",
-  "created_at":"2026-06-22T09:18:19.923728Z",
-  "updated_at":"2026-06-22T09:18:19.923728Z",
+  "id":"8f021620-3143-4fc3-848a-5b87169e785f",
+  "created_at":"2026-06-24T16:24:08.542935Z",
+  "updated_at":"2026-06-24T16:24:08.542935Z",
   "body":"This is a single targeted chirp!",
-  "user_id":"a7d725b4-4047-4b46-ad95-b27b824b05d1"
+  "user_id":"582f2b41-ceb2-4586-84f0-f670592c3917"
 }
 ```
 
@@ -704,7 +776,8 @@ Expected response:
 ```text
 HTTP/1.1 404 Not Found
 Content-Type: application/json
-...
+Date: Wed, 24 Jun 2026 22:25:04 GMT
+Content-Length: 30
 
 {"error":"Couldn't get chirp"}
 ```
