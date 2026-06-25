@@ -26,6 +26,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
 - **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` and `password` in the JSON request body. The password is hashed with Argon2 before storage. Returns the user's `id`, `created_at`, `updated_at`, and `email` (never the hashed password).
 - **User Login**: Authenticates a user via `POST /api/login`. Accepts an `email` and `password`. Returns the user resource, a signed and short-lived JWT token (expires in 1 hour), and a long-lived refresh token (expires in 60 days) on success, or `401 Unauthorized` with the message "Incorrect email or password" if the email lookup or password comparison fails.
+- **User Update**: Updates the authenticated user's email and password via `PUT /api/users`. Requires a valid JWT access token in the `Authorization: Bearer <token>` header and a new `email` and `password` in the JSON request body. Hashes the new password before storage. Returns the updated `User` resource (omitting the password) with a `200 OK` status. Returns `401 Unauthorized` if the token is missing or invalid.
 - **Token Refresh**: Issues a new access token via `POST /api/refresh`. Requires a valid, non-expired, non-revoked refresh token in the `Authorization: Bearer <refresh-token>` header. Returns a fresh JWT access token. Responds with `401 Unauthorized` if the refresh token is missing, expired, or revoked.
 - **Token Revocation**: Revokes a refresh token via `POST /api/revoke`. Requires a refresh token in the `Authorization: Bearer <refresh-token>` header. Sets `revoked_at` in the database and responds with `204 No Content`.
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status. Requires a valid JWT in the `Authorization: Bearer <token>` header. The user ID is derived from the token, not the request body. Returns `401 Unauthorized` if the JWT is missing or invalid.
@@ -88,6 +89,7 @@ Refresh tokens are random 256-bit hex-encoded strings generated with `crypto/ran
 ├── handler_refresh.go             # Handler for refreshing and revoking tokens
 ├── handler_reset.go               # Handler for resetting the request counter
 ├── handler_users_create.go        # Handler for creating a new user
+├── handler_users_update.go        # Handler for updating an authenticated user's email and password
 ├── index.html                     # Root HTML file served at http://localhost:8080
 ├── json.go                        # Shared helpers for encoding JSON responses and errors
 ├── main.go                        # Entry point for the Go server
@@ -262,6 +264,7 @@ sqlc generate
 | `/app/*`                | GET    | Serves static frontend files                                                                    |
 | `/api/healthz`          | GET    | Readiness check                                                                                 |
 | `/api/users`            | POST   | Create new user                                                                                 |
+| `/api/users`            | PUT    | Update the authenticated user's email and password (requires JWT)                               |
 | `/api/login`            | POST   | Authenticate a user with email and password. Returns access token (1hr) and refresh token (60d) |
 | `/api/refresh`          | POST   | Exchange a valid refresh token for a new access token                                           |
 | `/api/revoke`           | POST   | Revoke a refresh token (204 No Content)                                                         |
@@ -522,6 +525,71 @@ Date: Wed, 24 Jun 2026 22:07:36 GMT
 Content-Length: 39
 
 {"error":"Incorrect email or password"}
+```
+
+### Update user
+Reset the database, create a user, log in to get a valid access token, then update the user's email and password.
+
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+curl -i -X PUT http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"email": "updated@example.com", "password": "newpassword"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 15:03:16 GMT
+Content-Length: 161
+
+{
+  "id":"d8e1ccd4-1937-49ea-9fa4-9140eb153752",
+  "created_at":"2026-06-25T09:03:16.910034Z",
+  "updated_at":"2026-06-25T09:03:16.955803Z",
+  "email":"updated@example.com"
+}
+```
+*Note: `updated_at` will differ from `created_at` and reflect the time of the update.*
+
+#### Missing or invalid token
+Reset the database, create a user, log in but without storing the valid access token, then try to update the user's email and password.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+curl -i -X PUT http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer invalid_token" \
+  -d '{"email": "updated@example.com", "password": "newpassword"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 15:00:13 GMT
+Content-Length: 33
+
+{"error":"Couldn't validate JWT"}
 ```
 
 ### Token Refresh
