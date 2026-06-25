@@ -34,7 +34,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
 - **Chirp Deletion**: Deletes a chirp by its UUID via `DELETE /api/chirps/{chirpID}`. Requires a valid JWT in the `Authorization: Bearer <token>` header. Only the author of the chirp may delete it; returns `403 Forbidden` otherwise. Returns `204 No Content` on success, `401 Unauthorized` if the token is missing or invalid, and `404 Not Found` if the chirp does not exist.
 - **Chirpy Red Membership**: Users now have an `is_chirpy_red` boolean flag. It defaults to `false` and is included in user responses.
-- **Polka Webhooks**: Accepts `POST /api/polka/webhooks` events from the Polka payment provider. Ignores unsupported events with `204 No Content`. For `user.upgraded`, marks the referenced user as a Chirpy Red member.
+- **Polka Webhooks**: Accepts `POST /api/polka/webhooks` events from the Polka payment provider. Requires an API key in the Authorization header using the format `Authorization: ApiKey <key>`. Ignores unsupported events with `204 No Content`. For `user.upgraded`, marks the referenced user as a Chirpy Red member.
 
 
 ## Security Notes
@@ -59,6 +59,13 @@ Access tokens (JWTs) expire after 1 hour to limit the damage if one is intercept
 
 ### Refresh tokens are not JWTs
 Refresh tokens are random 256-bit hex-encoded strings generated with `crypto/rand`. Because they are stored in the database and looked up directly, there is no need for the self-contained, stateless properties that JWTs provide.
+
+### Polka webhooks are authenticated with an API key
+The `POST /api/polka/webhooks` endpoint only accepts requests that include a valid Polka API key in the `Authorization` header:
+```text
+Authorization: ApiKey <key>
+```
+Requests with a missing or incorrect key are rejected with `401 Unauthorized`.
 
 
 ## Project Structure
@@ -185,6 +192,7 @@ Create a `.env` file with the following:
 DB_URL="postgres://username:password@localhost:5432/chirpy?sslmode=disable"
 PLATFORM="<dev|prod>"
 JWT_SECRET="your-generated-secret-here"
+POLKA_KEY="your-polka-api-key-here"
 ```
 *Note: Generate a JWT secret with: `openssl rand -base64 64`*
 
@@ -193,8 +201,10 @@ Example (Linux/WSL):
 DB_URL="postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 PLATFORM="dev"
 JWT_SECRET="Rvn5iIEn+4CdTS9u7QEDH5Z6sttc73hsF+jqAKDtL90AY2lMHS5obnk1FL9Lvk75Iqr7fpVxIyXlAj6Km7de9Q=="
+POLKA_KEY="your-generated-polka-key-here"
 ```
-*Note: This `JWT_SECRET` is just an example of running the suggested command and is not the secret on this machine.*
+*Note: This `JWT_SECRET` is just an example of running the suggested command and is not the secret on the local development machine.*
+*Note: Generate a random `POLKA_KEY` for local development, for example with `openssl rand -hex 16`.*
 
 
 ## Database Migrations
@@ -279,7 +289,7 @@ sqlc generate
 | `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)                                         |
 | `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)                                        |
 | `/api/chirps/{chirpID}` | DELETE | Delete a chirp by ID (author only, requires JWT)                                                |
-| `/api/polka/webhooks`   | POST   | Receives Polka webhook events and upgrades users to Chirpy Red                                  |
+| `/api/polka/webhooks`   | POST   | Receives authenticated Polka webhook events and upgrades users to Chirpy Red                    |
 | `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                                                     |
 | `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only)                                   |
 
@@ -1266,6 +1276,7 @@ Expected request body:
 ```bash
 curl -i -X POST http://localhost:8080/api/polka/webhooks \
   -H "Content-Type: application/json" \
+  -H "Authorization: ApiKey $POLKA_KEY" \
   -d '{
     "event": "user.payment_failed",
     "data": {
@@ -1273,11 +1284,12 @@ curl -i -X POST http://localhost:8080/api/polka/webhooks \
     }
   }'
 ```
+*Note: This is the first test that cannot be copy/pasted directly; it requires using the actual POLKA_KEY secret.*
 
 Expected response:
 ```text
 HTTP/1.1 204 No Content
-Date: Thu, 25 Jun 2026 19:43:02 GMT
+Date: Thu, 25 Jun 2026 20:22:42 GMT
 ```
 
 #### Upgrade user to Chirpy Red
@@ -1292,6 +1304,7 @@ USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
 
 curl -i -X POST http://localhost:8080/api/polka/webhooks \
   -H "Content-Type: application/json" \
+  -H "Authorization: ApiKey $POLKA_KEY" \
   -d "{
     \"event\": \"user.upgraded\",
     \"data\": {
@@ -1307,20 +1320,42 @@ curl -i -X POST http://localhost:8080/api/login \
 Expected response:
 ```text
 HTTP/1.1 204 No Content
-Date: Thu, 25 Jun 2026 19:49:16 GMT
+Date: Thu, 25 Jun 2026 20:23:24 GMT
 
 HTTP/1.1 200 OK
 Content-Type: application/json
-Date: Thu, 25 Jun 2026 19:49:16 GMT
+Date: Thu, 25 Jun 2026 20:23:24 GMT
 Content-Length: 490
 
 {
-  "id":"7233f3f7-c460-40aa-913a-d335f2a88fec",
-  "created_at":"2026-06-25T13:49:16.231101Z",
-  "updated_at":"2026-06-25T13:49:16.241116Z",
+  "id":"5cdbbd26-f90d-4b4c-ae0c-e9bfc7ee2a72",
+  "created_at":"2026-06-25T14:23:24.230002Z",
+  "updated_at":"2026-06-25T14:23:24.238248Z",
   "email":"user@example.com",
   "is_chirpy_red":true,
-  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiNzIzM2YzZjctYzQ2MC00MGFhLTkxM2EtZDMzNWYyYTg4ZmVjIiwiZXhwIjoxNzgyNDIwNTU2LCJpYXQiOjE3ODI0MTY5NTZ9.TjCYurocZ0TdBduKSyZYZ8QT0Q1e0NAZtsWHnVMm7NM",
-  "refresh_token":"1385e35df48c1fdfbf2f1ec848918d447289586a41bee2327c72b56b1c6ebdfa"
+  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiNWNkYmJkMjYtZjkwZC00YjRjLWFlMGMtZTliZmM3ZWUyYTcyIiwiZXhwIjoxNzgyNDIyNjA0LCJpYXQiOjE3ODI0MTkwMDR9.mF2xi5d-1lde4OyzCF3n1m9j-bFqOj4HtpiWhD3VIw0",
+  "refresh_token":"259e3fe0d10aaab23643fd819dc81f153cdc93674236b65b91a016b631c4ce2f"
 }
+```
+
+#### Unauthorized request
+```bash
+curl -i -X POST http://localhost:8080/api/polka/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": "user.payment_failed",
+    "data": {
+      "user_id": "00000000-0000-0000-0000-000000000000"
+    }
+  }'
+```
+
+Expected response:
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 20:24:35 GMT
+Content-Length: 33
+
+{"error":"Couldn't find API key"}
 ```
