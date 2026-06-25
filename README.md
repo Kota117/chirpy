@@ -33,6 +33,8 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
 - **Chirp Deletion**: Deletes a chirp by its UUID via `DELETE /api/chirps/{chirpID}`. Requires a valid JWT in the `Authorization: Bearer <token>` header. Only the author of the chirp may delete it; returns `403 Forbidden` otherwise. Returns `204 No Content` on success, `401 Unauthorized` if the token is missing or invalid, and `404 Not Found` if the chirp does not exist.
+- **Chirpy Red Membership**: Users now have an `is_chirpy_red` boolean flag. It defaults to `false` and is included in user responses.
+- **Polka Webhooks**: Accepts `POST /api/polka/webhooks` events from the Polka payment provider. Ignores unsupported events with `204 No Content`. For `user.upgraded`, marks the referenced user as a Chirpy Red member.
 
 
 ## Security Notes
@@ -78,7 +80,8 @@ Refresh tokens are random 256-bit hex-encoded strings generated with `crypto/ran
 │       ├── 001_users.sql
 │       ├── 002_chirps.sql
 │       ├── 003_password.sql
-│       └── 004_refresh_tokens.sql
+│       ├── 004_refresh_tokens.sql
+│       └── 005_chirpy_red.sql
 ├── .env                           # Local environment variables (not version-tracked)
 ├── .gitignore                     # Disables version-tracking for any included files/folders
 ├── go.mod                         # Go module definition
@@ -92,6 +95,7 @@ Refresh tokens are random 256-bit hex-encoded strings generated with `crypto/ran
 ├── handler_reset.go               # Handler for resetting the request counter
 ├── handler_users_create.go        # Handler for creating a new user
 ├── handler_users_update.go        # Handler for updating an authenticated user's email and password
+├── handler_webhooks.go            # Handler for processing Polka webhook events
 ├── index.html                     # Root HTML file served at http://localhost:8080
 ├── json.go                        # Shared helpers for encoding JSON responses and errors
 ├── main.go                        # Entry point for the Go server
@@ -238,6 +242,7 @@ psql "postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 | users          | updated_at      | TIMESTAMP | NOT NULL                                         |
 | users          | email           | TEXT      | NOT NULL, UNIQUE                                 |
 | users          | hashed_password | TEXT      | NOT NULL, DEFAULT 'unset'                        |
+| users          | is_chirpy_red   | BOOLEAN   | NOT NULL, DEFAULT false                          |
 | chirps         | id              | UUID      | PRIMARY KEY                                      |
 | chirps         | created_at      | TIMESTAMP | NOT NULL                                         |
 | chirps         | updated_at      | TIMESTAMP | NOT NULL                                         |
@@ -274,6 +279,7 @@ sqlc generate
 | `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)                                         |
 | `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)                                        |
 | `/api/chirps/{chirpID}` | DELETE | Delete a chirp by ID (author only, requires JWT)                                                |
+| `/api/polka/webhooks`   | POST   | Receives Polka webhook events and upgrades users to Chirpy Red                                  |
 | `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                                                     |
 | `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only)                                   |
 
@@ -460,14 +466,15 @@ Expected response:
 ```text
 HTTP/1.1 201 Created
 Content-Type: application/json
-Date: Wed, 24 Jun 2026 22:05:19 GMT
-Content-Length: 158
+Date: Thu, 25 Jun 2026 19:36:01 GMT
+Content-Length: 180
 
 {
-  "id":"8dc99490-ce27-4e16-b0ca-59c96d5388b6",
-  "created_at":"2026-06-24T16:05:19.421934Z",
-  "updated_at":"2026-06-24T16:05:19.421934Z",
-  "email":"user@example.com"
+  "id":"95cc4ec5-0166-42f9-b7a9-fb5a1d9a3cb6",
+  "created_at":"2026-06-25T13:36:01.387762Z",
+  "updated_at":"2026-06-25T13:36:01.387762Z",
+  "email":"user@example.com",
+  "is_chirpy_red":false
 }
 ```
 *Note: The `id` field will be a random UUID. The `created_at` and `updated_at` fields should show around when the command was run (in local time).*
@@ -493,16 +500,17 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: application/json
-Date: Thu, 25 Jun 2026 02:17:51 GMT
-Content-Length: 469
+Date: Thu, 25 Jun 2026 19:36:31 GMT
+Content-Length: 491
 
 {
-  "id":"8617c418-5f3c-4f87-b40d-489e60b693b5",
-  "created_at":"2026-06-24T20:17:51.209535Z",
-  "updated_at":"2026-06-24T20:17:51.209535Z",
+  "id":"81aeca74-e9d6-4c0a-aa2a-4535f59ae239",
+  "created_at":"2026-06-25T13:36:31.427248Z",
+  "updated_at":"2026-06-25T13:36:31.427248Z",
   "email":"user@example.com",
-  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiODYxN2M0MTgtNWYzYy00Zjg3LWI0MGQtNDg5ZTYwYjY5M2I1IiwiZXhwIjoxNzgyMzU3NDcxLCJpYXQiOjE3ODIzNTM4NzF9.1fUZ8UUIQ0dkqMu0un1n47REZsXn9-I89aje39nH3LA",
-  "refresh_token":"7196ee67a0389cf04572f943b8f4e2b955d3933f1847a3cc6e928e5898a51b6f"
+  "is_chirpy_red":false,
+  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiODFhZWNhNzQtZTlkNi00YzBhLWFhMmEtNDUzNWY1OWFlMjM5IiwiZXhwIjoxNzgyNDE5NzkxLCJpYXQiOjE3ODI0MTYxOTF9.s8CgXSsVNsERzUPugpN_xOxeFFjMpBws1ni8mYNeKHU",
+  "refresh_token":"22fa8e1d484c3bfd2f42c9f182b078098f7cb703de034f014016dc1a481a576b"
 }
 ```
 
@@ -554,14 +562,15 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: application/json
-Date: Thu, 25 Jun 2026 15:03:16 GMT
-Content-Length: 161
+Date: Thu, 25 Jun 2026 19:37:42 GMT
+Content-Length: 183
 
 {
-  "id":"d8e1ccd4-1937-49ea-9fa4-9140eb153752",
-  "created_at":"2026-06-25T09:03:16.910034Z",
-  "updated_at":"2026-06-25T09:03:16.955803Z",
-  "email":"updated@example.com"
+  "id":"35cfd41c-4578-4add-8095-fcf011b4daa0",
+  "created_at":"2026-06-25T13:37:42.053155Z",
+  "updated_at":"2026-06-25T13:37:42.132086Z",
+  "email":"updated@example.com",
+  "is_chirpy_red":false
 }
 ```
 *Note: `updated_at` will differ from `created_at` and reflect the time of the update.*
@@ -1233,3 +1242,85 @@ Content-Length: 47
 ```
 *Note: This response is not prettified like most others have been.*
 
+
+
+### Polka Webhooks
+Chirpy integrates with Polka, a payment provider that sends webhook events to notify the server when a user upgrades their membership.
+
+The webhook endpoint is:
+```text
+POST /api/polka/webhooks
+```
+
+Expected request body:
+```json
+{
+  "event": "user.upgraded",
+  "data": {
+    "user_id": "3311741c-680c-4546-99f3-fc9efac2036c"
+  }
+}
+```
+
+#### Ignored event
+```bash
+curl -i -X POST http://localhost:8080/api/polka/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event": "user.payment_failed",
+    "data": {
+      "user_id": "00000000-0000-0000-0000-000000000000"
+    }
+  }'
+```
+
+Expected response:
+```text
+HTTP/1.1 204 No Content
+Date: Thu, 25 Jun 2026 19:43:02 GMT
+```
+
+#### Upgrade user to Chirpy Red
+Reset the database, create a user, send a Polka webhook, then log in to confirm the user is now a Chirpy Red member.
+
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+USER_ID=$(curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.id')
+
+curl -i -X POST http://localhost:8080/api/polka/webhooks \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"event\": \"user.upgraded\",
+    \"data\": {
+      \"user_id\": \"$USER_ID\"
+    }
+  }"
+
+curl -i -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}'
+```
+
+Expected response:
+```text
+HTTP/1.1 204 No Content
+Date: Thu, 25 Jun 2026 19:49:16 GMT
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 19:49:16 GMT
+Content-Length: 490
+
+{
+  "id":"7233f3f7-c460-40aa-913a-d335f2a88fec",
+  "created_at":"2026-06-25T13:49:16.231101Z",
+  "updated_at":"2026-06-25T13:49:16.241116Z",
+  "email":"user@example.com",
+  "is_chirpy_red":true,
+  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiNzIzM2YzZjctYzQ2MC00MGFhLTkxM2EtZDMzNWYyYTg4ZmVjIiwiZXhwIjoxNzgyNDIwNTU2LCJpYXQiOjE3ODI0MTY5NTZ9.TjCYurocZ0TdBduKSyZYZ8QT0Q1e0NAZtsWHnVMm7NM",
+  "refresh_token":"1385e35df48c1fdfbf2f1ec848918d447289586a41bee2327c72b56b1c6ebdfa"
+}
+```
