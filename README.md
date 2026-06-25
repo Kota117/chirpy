@@ -32,6 +32,7 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status. Requires a valid JWT in the `Authorization: Bearer <token>` header. The user ID is derived from the token, not the request body. Returns `401 Unauthorized` if the JWT is missing or invalid.
 - **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
+- **Chirp Deletion**: Deletes a chirp by its UUID via `DELETE /api/chirps/{chirpID}`. Requires a valid JWT in the `Authorization: Bearer <token>` header. Only the author of the chirp may delete it; returns `403 Forbidden` otherwise. Returns `204 No Content` on success, `401 Unauthorized` if the token is missing or invalid, and `404 Not Found` if the chirp does not exist.
 
 
 ## Security Notes
@@ -82,6 +83,7 @@ Refresh tokens are random 256-bit hex-encoded strings generated with `crypto/ran
 ├── .gitignore                     # Disables version-tracking for any included files/folders
 ├── go.mod                         # Go module definition
 ├── handler_chirps_create.go       # Handler for creating and validating a new chirp
+├── handler_chirps_delete.go       # Handler for deleting a chirp by UUID (author-only)
 ├── handler_chirps_get.go          # Handler for retrieving chirps (all or by uuid)
 ├── handler_login.go               # Handler for authenticating a user
 ├── handler_metrics.go             # Handler for getting the number of requests since the server was last started
@@ -271,6 +273,7 @@ sqlc generate
 | `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)                                          |
 | `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)                                         |
 | `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)                                        |
+| `/api/chirps/{chirpID}` | DELETE | Delete a chirp by ID (author only, requires JWT)                                                |
 | `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                                                     |
 | `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only)                                   |
 
@@ -959,6 +962,137 @@ Date: Wed, 24 Jun 2026 22:25:04 GMT
 Content-Length: 30
 
 {"error":"Couldn't get chirp"}
+```
+
+### Delete a chirp
+
+#### Deletion attempt by author
+Resets the database, creates a `user`, logs in to get a valid access token, creates a valid `chirp`, then deletes that `chirp`.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+CHIRP_ID=$(curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "To be deleted."}' | jq -r '.id')
+
+curl -i -X DELETE http://localhost:8080/api/chirps/$CHIRP_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Expected response:
+```text
+HTTP/1.1 204 No Content
+Date: Thu, 25 Jun 2026 15:36:20 GMT
+```
+
+#### Deletion attempt by non-author
+Resets the database, creates a `user`, logs in to get a valid access token, creates a valid `chirp`, creates a different `user`, logs in to get a valid access token, then tries to delete that `chirp`.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+CHIRP_ID=$(curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "To be deleted."}' | jq -r '.id')
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "different_user@example.com", "password": "5678"}' > /dev/null
+
+OTHER_TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "different_user@example.com", "password": "5678"}' | jq -r '.token')
+
+curl -i -X DELETE http://localhost:8080/api/chirps/$CHIRP_ID \
+  -H "Authorization: Bearer $OTHER_TOKEN"
+```
+
+Expected response:
+```text
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 15:39:09 GMT
+Content-Length: 39
+
+{"error":"You can't delete this chirp"}
+```
+
+#### Missing token
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+CHIRP_ID=$(curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "To be deleted."}' | jq -r '.id')
+
+curl -i -X DELETE http://localhost:8080/api/chirps/$CHIRP_ID
+```
+
+Expected response:
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 15:55:46 GMT
+Content-Length: 29
+
+{"error":"Couldn't find JWT"}
+```
+
+#### Invalid token
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+CHIRP_ID=$(curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "To be deleted."}' | jq -r '.id')
+
+curl -i -X DELETE http://localhost:8080/api/chirps/$CHIRP_ID \
+  -H "Authorization: Bearer invalid_token"
+```
+
+Expected response:
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 15:56:30 GMT
+Content-Length: 33
+
+{"error":"Couldn't validate JWT"}
 ```
 
 ### Chirp creation with token management
