@@ -30,7 +30,9 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 - **Token Refresh**: Issues a new access token via `POST /api/refresh`. Requires a valid, non-expired, non-revoked refresh token in the `Authorization: Bearer <refresh-token>` header. Returns a fresh JWT access token. Responds with `401 Unauthorized` if the refresh token is missing, expired, or revoked.
 - **Token Revocation**: Revokes a refresh token via `POST /api/revoke`. Requires a refresh token in the `Authorization: Bearer <refresh-token>` header. Sets `revoked_at` in the database and responds with `204 No Content`.
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status. Requires a valid JWT in the `Authorization: Bearer <token>` header. The user ID is derived from the token, not the request body. Returns `401 Unauthorized` if the JWT is missing or invalid.
-- **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Accepts an optional `author_id` query parameter to filter chirps by a specific user. Returns them as a JSON array sorted in ascending order by `created_at`.
+- **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Accepts optional query parameters:
+  - `author_id`: to filter chirps by a specific user.
+  - `sort`: to order chirps by `created_at`, using `asc` or `desc`. Defaults to ascending order (`asc`) when `sort` is omitted.
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
 - **Chirp Deletion**: Deletes a chirp by its UUID via `DELETE /api/chirps/{chirpID}`. Requires a valid JWT in the `Authorization: Bearer <token>` header. Only the author of the chirp may delete it; returns `403 Forbidden` otherwise. Returns `204 No Content` on success, `401 Unauthorized` if the token is missing or invalid, and `404 Not Found` if the chirp does not exist.
 - **Chirpy Red Membership**: Users now have an `is_chirpy_red` boolean flag. It defaults to `false` and is included in user responses.
@@ -276,22 +278,22 @@ sqlc generate
 *Note: This command should be run from the `root` of the project.*
 
 ## Usage
-| Endpoint                | Method | Description                                                                                     |
-| ----------------------- | ------ | ----------------------------------------------------------------------------------------------- |
-| `/app/*`                | GET    | Serves static frontend files                                                                    |
-| `/api/healthz`          | GET    | Readiness check                                                                                 |
-| `/api/users`            | POST   | Create new user                                                                                 |
-| `/api/users`            | PUT    | Update the authenticated user's email and password (requires JWT)                               |
-| `/api/login`            | POST   | Authenticate a user with email and password. Returns access token (1hr) and refresh token (60d) |
-| `/api/refresh`          | POST   | Exchange a valid refresh token for a new access token                                           |
-| `/api/revoke`           | POST   | Revoke a refresh token (204 No Content)                                                         |
-| `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)                                          |
-| `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time). Optionally filter by ?author_id=<uuid> |
-| `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)                                        |
-| `/api/chirps/{chirpID}` | DELETE | Delete a chirp by ID (author only, requires JWT)                                                |
-| `/api/polka/webhooks`   | POST   | Receives authenticated Polka webhook events and upgrades users to Chirpy Red                    |
-| `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                                                     |
-| `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only)                                   |
+| Endpoint                | Method | Description                                                                                                    |
+| ----------------------- | ------ | -------------------------------------------------------------------------------------------------------------- |
+| `/app/*`                | GET    | Serves static frontend files                                                                                   |
+| `/api/healthz`          | GET    | Readiness check                                                                                                |
+| `/api/users`            | POST   | Create new user                                                                                                |
+| `/api/users`            | PUT    | Update the authenticated user's email and password (requires JWT)                                              |
+| `/api/login`            | POST   | Authenticate a user with email and password. Returns access token (1hr) and refresh token (60d)                |
+| `/api/refresh`          | POST   | Exchange a valid refresh token for a new access token                                                          |
+| `/api/revoke`           | POST   | Revoke a refresh token (204 No Content)                                                                        |
+| `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)                                                         |
+| `/api/chirps`           | GET    | Retrieve all chirps. Optionally filter by ?author_id=<uuid> and sort by ?sort=asc or ?sort=desc (default: asc) |
+| `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)                                                       |
+| `/api/chirps/{chirpID}` | DELETE | Delete a chirp by ID (author only, requires JWT)                                                               |
+| `/api/polka/webhooks`   | POST   | Receives authenticated Polka webhook events and upgrades users to Chirpy Red                                   |
+| `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                                                                    |
+| `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only)                                                  |
 
 
 ## Running the Server
@@ -866,7 +868,7 @@ Content-Length: 212
 ```
 
 ### Retrieve all chirps
-Retrieves a list of all chirps in the database, ordered chronologically. First resets the database, creates a user, creates two chirps, and then retrieves all chirps.
+Retrieves a list of all chirps in the database, sorted by `created_at` in ascending order. First resets the database, creates a user, creates two chirps, and then retrieves all chirps.
 
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
@@ -918,8 +920,60 @@ Content-Length: 416
 ```
 *Note: Notice that both chirps' `user_id` are the same because the same user posted each one using one unique token.*
 
+### Retrieve all chirps in descending order
+Retrieves a list of all chirps in the database, sorted by `created_at` in descending order. First resets the database, creates a user, creates two chirps, and then retrieves all chirps.
+
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "This is another chirp!"}' > /dev/null
+
+curl -i http://localhost:8080/api/chirps?sort=desc
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 21:42:26 GMT
+Content-Length: 418
+
+[
+  {
+    "id":"661487a8-3621-4c66-9178-6ba032b2a860",
+    "created_at":"2026-06-25T15:42:26.661493Z",
+    "updated_at":"2026-06-25T15:42:26.661493Z",
+    "body":"This is another chirp!",
+    "user_id":"2c12d66a-8a30-4205-b93e-bbc99ed681f6"
+  },
+  {
+    "id":"6b02770c-4880-4364-82b3-981c1d6fb45c",
+    "created_at":"2026-06-25T15:42:26.652086Z",
+    "updated_at":"2026-06-25T15:42:26.652086Z",
+    "body":"Hello, World!",
+    "user_id":"2c12d66a-8a30-4205-b93e-bbc99ed681f6"
+  }
+]
+```
+
 ### Retrieve all chirps by author_id
-Retrieves a list of all chirps by a particular author in the database, ordered chronologically. First resets the database, creates two users, logs in to each user to get access tokens for each, creates a chirp from the first user, creates two chirps from the second user, creates another chirp from the first user, creates another chirp from the second user, and then retrieves only the first user's chirps.
+Retrieves a list of all chirps by a particular author in the database, sorted by `created_at` in ascending order. First resets the database, creates two users, logs in to each user to get access tokens for each, creates a chirp from the first user, creates two chirps from the second user, creates another chirp from the first user, creates another chirp from the second user, and then retrieves only the first user's chirps.
 
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
@@ -993,6 +1047,81 @@ Content-Length: 420
 ]
 ```
 *Note: Both chirps' `user_id` match `FIRST_USERID` because only that user's chirps were requested.*
+
+### Retrieve all chirps by author_id in descending order
+Retrieves a list of all chirps by a particular author in the database, sorted by `created_at` in descending order. First resets the database, creates two users, logs in to each user to get access tokens for each, creates a chirp from the first user, creates two chirps from the second user, creates another chirp from the first user, creates another chirp from the second user, and then retrieves only the first user's chirps.
+
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+FIRST_USERID=$(curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.id')
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "second_user@example.com", "password": "5678"}' > /dev/null
+
+FIRST_TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.token')
+
+SECOND_TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "second_user@example.com", "password": "5678"}' | jq -r '.token')
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $FIRST_TOKEN" \
+  -d '{"body": "Hello, World!"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SECOND_TOKEN" \
+  -d '{"body": "This is my first chirp!"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SECOND_TOKEN" \
+  -d '{"body": "This Chirpy service is awesome!"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $FIRST_TOKEN" \
+  -d '{"body": "This is my second chirp!"}' > /dev/null
+
+curl -s -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SECOND_TOKEN" \
+  -d '{"body": "That other person is funny!"}' > /dev/null
+
+curl -i "http://localhost:8080/api/chirps?author_id=$FIRST_USERID&sort=desc"
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 21:50:26 GMT
+Content-Length: 420
+
+[
+  {
+    "id":"8ca15a38-c2da-4a49-92bb-107447a9932e",
+    "created_at":"2026-06-25T15:50:26.728556Z",
+    "updated_at":"2026-06-25T15:50:26.728556Z",
+    "body":"This is my second chirp!",
+    "user_id":"ab6c298a-b4b7-48a4-8700-4fad49cdd593"
+  },
+  {
+    "id":"89143cf3-c8d2-43c0-b007-cb82d0350cd3",
+    "created_at":"2026-06-25T15:50:26.703515Z",
+    "updated_at":"2026-06-25T15:50:26.703515Z",
+    "body":"Hello, World!",
+    "user_id":"ab6c298a-b4b7-48a4-8700-4fad49cdd593"
+  }
+]
+```
 
 ### Retrieve a single chirp
 
