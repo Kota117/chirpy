@@ -25,7 +25,9 @@ Chirpy follows a monolithic structure but maintains a clean separation between t
 *Note: The request counter is stored in memory and resets to 0 whenever the server is stopped and restarted.*
 - **Metrics Reset**: Resets the hit counter back to zero and deletes all users from the database via `POST /admin/reset`. To gate this dangerous endpoint, it is only accessible when `PLATFORM=dev`; returns `403 Forbidden` otherwise.
 - **User Creation**: Creates a new user via `POST /api/users`. Accepts an `email` and `password` in the JSON request body. The password is hashed with Argon2 before storage. Returns the user's `id`, `created_at`, `updated_at`, and `email` (never the hashed password).
-- **User Login**: Authenticates a user via `POST /api/login`. Accepts an `email` and `password`. Returns the user resource and a signed JWT token on success, or `401 Unauthorized` with the message "Incorrect email or password" if the email lookup or password comparison fails.
+- **User Login**: Authenticates a user via `POST /api/login`. Accepts an `email` and `password`. Returns the user resource, a signed and short-lived JWT token (expires in 1 hour), and a long-lived refresh token (expires in 60 days) on success, or `401 Unauthorized` with the message "Incorrect email or password" if the email lookup or password comparison fails.
+- **Token Refresh**: Issues a new access token via `POST /api/refresh`. Requires a valid, non-expired, non-revoked refresh token in the `Authorization: Bearer <refresh-token>` header. Returns a fresh JWT access token. Responds with `401 Unauthorized` if the refresh token is missing, expired, or revoked.
+- **Token Revocation**: Revokes a refresh token via `POST /api/revoke`. Requires a refresh token in the `Authorization: Bearer <refresh-token>` header. Sets `revoked_at` in the database and responds with `204 No Content`.
 - **Chirp Creation**: Creates a new chirp via `POST /api/chirps`. Validates that the chirp is no longer than 140 characters and replaces profane words (`kerfuffle`, `sharbert`, `fornax`) with `****`. Saves the chirp to the database and returns the full chirp resource with a `201 Created` status. Requires a valid JWT in the `Authorization: Bearer <token>` header. The user ID is derived from the token, not the request body. Returns `401 Unauthorized` if the JWT is missing or invalid.
 - **Chirp Retrieval**: Retrieves all chirps stored in the database via `GET /api/chirps`. Returns them as a JSON array sorted in ascending order by `created_at`.
 - **Single Chirp Retrieval**: Retrieves a single chirp by its UUID via `GET /api/chirps/{chirpID}`. Returns `404 Not Found` if the chirp does not exist.
@@ -48,39 +50,48 @@ Passwords are sent as plain text in the request body. This is only safe because 
 ### JWT
 JWTs are signed, not encrypted — The payload is Base64-encoded and readable by anyone. Never store sensitive data (like passwords) in a JWT. The signature only guarantees the token hasn't been tampered with.
 
+### Access tokens are short-lived; refresh tokens are long-lived
+Access tokens (JWTs) expire after 1 hour to limit the damage if one is intercepted. Refresh tokens expire after 60 days and are stored server-side, meaning they can be explicitly revoked. This two-token pattern balances security with user convenience.
+
+### Refresh tokens are not JWTs
+Refresh tokens are random 256-bit hex-encoded strings generated with `crypto/rand`. Because they are stored in the database and looked up directly, there is no need for the self-contained, stateless properties that JWTs provide.
+
 
 ## Project Structure
 ```text
 .
-├── assets/                   # Static assets like images and logos
+├── assets/                        # Static assets like images and logos
 │   └── logo.png
 ├── internal/
-│   ├── auth/                 # Password hashing & comparison and JWT creation & validation helpers
+│   ├── auth/                      # Password hashing & comparison, JWT creation & validation, and refresh token generation helpers
 │   │   ├── auth.go
 │   │   └── auth_test.go
-│   └── database/             # SQLC-generated Go database code
+│   └── database/                  # SQLC-generated Go database code
 ├── sql/                     
-│   ├── queries/              # SQLC query definitions
+│   ├── queries/                   # SQLC query definitions
 │   │   ├── chirps.sql
+│   │   ├── refresh_tokens.sql
 │   │   └── users.sql
-│   └── schema/               # Goose migration files
+│   └── schema/                    # Goose migration files
 │       ├── 001_users.sql
 │       ├── 002_chirps.sql
-│       └── 003_password.sql
-├── .env                      # Local environment variables (not version-tracked)
-├── .gitignore                # Disables version-tracking for any included files/folders
-├── go.mod                    # Go module definition
-├── handler_chirps_create.go  # Handler for creating and validating a new chirp
-├── handler_chirps_get.go     # Handler for retrieving chirps (all or by uuid)
-├── handler_login.go          # Handler for authenticating a user
-├── handler_metrics.go        # Handler for getting the number of requests since the server was last started
-├── handler_readiness.go      # Handler for testing if the server is up and ready to receive traffic
-├── handler_reset.go          # Handler for resetting the request counter
-├── handler_users_create.go   # Handler for creating a new user
-├── index.html                # Root HTML file served at http://localhost:8080
-├── json.go                   # Shared helpers for encoding JSON responses and errors
-├── main.go                   # Entry point for the Go server
-└── sqlc.yaml                 # SQLC configuration
+│       ├── 003_password.sql
+│       └── 004_refresh_tokens.sql
+├── .env                           # Local environment variables (not version-tracked)
+├── .gitignore                     # Disables version-tracking for any included files/folders
+├── go.mod                         # Go module definition
+├── handler_chirps_create.go       # Handler for creating and validating a new chirp
+├── handler_chirps_get.go          # Handler for retrieving chirps (all or by uuid)
+├── handler_login.go               # Handler for authenticating a user
+├── handler_metrics.go             # Handler for getting the number of requests since the server was last started
+├── handler_readiness.go           # Handler for testing if the server is up and ready to receive traffic
+├── handler_refresh.go             # Handler for refreshing and revoking tokens
+├── handler_reset.go               # Handler for resetting the request counter
+├── handler_users_create.go        # Handler for creating a new user
+├── index.html                     # Root HTML file served at http://localhost:8080
+├── json.go                        # Shared helpers for encoding JSON responses and errors
+├── main.go                        # Entry point for the Go server
+└── sqlc.yaml                      # SQLC configuration
 ```
 
 
@@ -216,18 +227,24 @@ psql "postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable"
 
 
 ## Current Schema
-| Table  | Column          | Type      | Constraints                                      |
-| ------ | --------------- | --------- | ------------------------------------------------ |
-| users  | id              | UUID      | PRIMARY KEY                                      |
-| users  | created_at      | TIMESTAMP | NOT NULL                                         |
-| users  | updated_at      | TIMESTAMP | NOT NULL                                         |
-| users  | email           | TEXT      | NOT NULL, UNIQUE                                 |
-| users  | hashed_password | TEXT      | NOT NULL, DEFAULT 'unset'                        |
-| chirps | id              | UUID      | PRIMARY KEY                                      |
-| chirps | created_at      | TIMESTAMP | NOT NULL                                         |
-| chirps | updated_at      | TIMESTAMP | NOT NULL                                         |
-| chirps | body            | TEXT      | NOT NULL                                         |
-| chirps | user_id         | UUID      | NOT NULL, REFERENCES users(id) ON DELETE CASCADE |
+| Table          | Column          | Type      | Constraints                                      |
+| -------------- | --------------- | --------- | ------------------------------------------------ |
+| users          | id              | UUID      | PRIMARY KEY                                      |
+| users          | created_at      | TIMESTAMP | NOT NULL                                         |
+| users          | updated_at      | TIMESTAMP | NOT NULL                                         |
+| users          | email           | TEXT      | NOT NULL, UNIQUE                                 |
+| users          | hashed_password | TEXT      | NOT NULL, DEFAULT 'unset'                        |
+| chirps         | id              | UUID      | PRIMARY KEY                                      |
+| chirps         | created_at      | TIMESTAMP | NOT NULL                                         |
+| chirps         | updated_at      | TIMESTAMP | NOT NULL                                         |
+| chirps         | body            | TEXT      | NOT NULL                                         |
+| chirps         | user_id         | UUID      | NOT NULL, REFERENCES users(id) ON DELETE CASCADE |
+| refresh_tokens | token           | TEXT      | PRIMARY KEY                                      |
+| refresh_tokens | created_at      | TIMESTAMP | NOT NULL                                         |
+| refresh_tokens | updated_at      | TIMESTAMP | NOT NULL                                         |
+| refresh_tokens | user_id         | UUID      | NOT NULL, REFERENCES users(id) ON DELETE CASCADE |
+| refresh_tokens | expires_at      | TIMESTAMP | NOT NULL                                         |
+| refresh_tokens | revoked_at      | TIMESTAMP | (nullable — null means active)                   |
 
 
 ## Generating Database Code (SQLC)
@@ -240,17 +257,19 @@ sqlc generate
 *Note: This command should be run from the `root` of the project.*
 
 ## Usage
-| Endpoint                | Method | Description                                                   |
-| ----------------------- | ------ | ------------------------------------------------------------- |
-| `/app/*`                | GET    | Serves static frontend files                                  |
-| `/api/healthz`          | GET    | Readiness check                                               |
-| `/api/users`            | POST   | Create new user                                               |
-| `/api/login`            | POST   | Authenticate a user with email and password                   |
-| `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)        |
-| `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)       |
-| `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)      |
-| `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                   |
-| `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only) |
+| Endpoint                | Method | Description                                                                                     |
+| ----------------------- | ------ | ----------------------------------------------------------------------------------------------- |
+| `/app/*`                | GET    | Serves static frontend files                                                                    |
+| `/api/healthz`          | GET    | Readiness check                                                                                 |
+| `/api/users`            | POST   | Create new user                                                                                 |
+| `/api/login`            | POST   | Authenticate a user with email and password. Returns access token (1hr) and refresh token (60d) |
+| `/api/refresh`          | POST   | Exchange a valid refresh token for a new access token                                           |
+| `/api/revoke`           | POST   | Revoke a refresh token (204 No Content)                                                         |
+| `/api/chirps`           | POST   | Create a new chirp (max 140 chars, profanity filtered)                                          |
+| `/api/chirps`           | GET    | Retrieve all chirps (sorted ascending by creation time)                                         |
+| `/api/chirps/{chirpID}` | GET    | Retrieve a single chirp by ID (returns 404 if not found)                                        |
+| `/admin/metrics`        | GET    | Retrieve hit counter (HTML)                                                                     |
+| `/admin/reset`          | POST   | Reset hit counter and delete all users (dev environment only)                                   |
 
 
 ## Running the Server
@@ -277,7 +296,9 @@ The terminal window running the server will show a message like this:
 ## Manually Testing the Server
 While the server is running in one terminal window, the back-end can be manually tested in another terminal window. Additionally, the front-end content can be viewed in a browser at `http://localhost:8080/app/`.  
   
-Admin metrics can be viewed at `http://localhost:8080/admin/metrics`.
+Admin metrics can be viewed at `http://localhost:8080/admin/metrics`.  
+
+Requires `jq` to be installed: `sudo apt install jq`.
 
 ### Check if the server is available
 Requires `curl` to be installed: `sudo apt install curl`. To check if the server is up and ready to receive traffic (only accepts `GET` requests):
@@ -416,7 +437,7 @@ Hits reset to 0 and database reset to initial state.
 *Note: Sending any non-`POST` HTTP request to `/admin/reset` will result in a `405 Method Not Allowed` response.*
 
 ### Create new user
-It is helpful to always reset the database before testing so that any previous tests won't affect the current test.
+It is helpful to always reset the database before testing so that any previous tests won't affect the current test. Reset the database then create a user.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -449,7 +470,7 @@ Content-Length: 158
 ### Login
 
 #### Correct password
-First reset the database, create a user, then log in with the same credentials.
+Reset the database, create a user, then log in with the same credentials.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -466,20 +487,21 @@ Expected response:
 ```text
 HTTP/1.1 200 OK
 Content-Type: application/json
-Date: Wed, 24 Jun 2026 22:06:13 GMT
-Content-Length: 386
+Date: Thu, 25 Jun 2026 02:17:51 GMT
+Content-Length: 469
 
 {
-  "id":"55defd5f-2642-4c84-b621-dd777a7b405d",
-  "created_at":"2026-06-24T16:06:13.886916Z",
-  "updated_at":"2026-06-24T16:06:13.886916Z",
+  "id":"8617c418-5f3c-4f87-b40d-489e60b693b5",
+  "created_at":"2026-06-24T20:17:51.209535Z",
+  "updated_at":"2026-06-24T20:17:51.209535Z",
   "email":"user@example.com",
-  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiNTVkZWZkNWYtMjY0Mi00Yzg0LWI2MjEtZGQ3NzdhN2I0MDVkIiwiZXhwIjoxNzgyMzQyMzczLCJpYXQiOjE3ODIzMzg3NzN9.JuOQnG39LzzxKbrmGBRrcSj6eWCe6f1Vjxn8i-yUxIk"
+  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiODYxN2M0MTgtNWYzYy00Zjg3LWI0MGQtNDg5ZTYwYjY5M2I1IiwiZXhwIjoxNzgyMzU3NDcxLCJpYXQiOjE3ODIzNTM4NzF9.1fUZ8UUIQ0dkqMu0un1n47REZsXn9-I89aje39nH3LA",
+  "refresh_token":"7196ee67a0389cf04572f943b8f4e2b955d3933f1847a3cc6e928e5898a51b6f"
 }
 ```
 
 #### Incorrect password
-First reset the database, create a user, then log in with the wrong password credentials.
+Reset the database, create a user, then log in with the wrong password credentials.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -502,11 +524,96 @@ Content-Length: 39
 {"error":"Incorrect email or password"}
 ```
 
+### Token Refresh
+Reset the database, create a user, log in, then refresh the short-lived access token.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+REFRESH_TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.refresh_token')
+
+curl -i -X POST http://localhost:8080/api/refresh \
+  -H "Authorization: Bearer $REFRESH_TOKEN"
+```
+
+Expected response:
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 02:14:06 GMT
+Content-Length: 229
+
+{
+  "token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiYmJhM2M0NjUtYWE0YS00NzI1LWI2NTYtNGRiM2Y0OGZjZjFhIiwiZXhwIjoxNzgyMzU3MjQ2LCJpYXQiOjE3ODIzNTM2NDZ9.9jkGj8Wzy0O6c52g3TAa4Y_cTA9DLBkSR_miYw1XkF0"
+}
+```
+
+### Token Revocation
+
+#### Revoke
+Reset the database, create a user, log in, then revoke the long-lived refresh token.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+REFRESH_TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.refresh_token')
+
+curl -i -X POST http://localhost:8080/api/revoke \
+  -H "Authorization: Bearer $REFRESH_TOKEN"
+```
+
+Expected response:
+```text
+HTTP/1.1 204 No Content
+Date: Thu, 25 Jun 2026 02:16:27 GMT
+```
+*Note: `204 No Content` means the request succeeded but there is intentionally no response body. This is the standard status code for successful operations that have nothing to return.*
+
+#### Refresh after revocation
+Reset the database, create a user, log in, revoke the long-lived refresh token, then try to refresh the short-lived access token.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+REFRESH_TOKEN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' | jq -r '.refresh_token')
+
+curl -s -X POST http://localhost:8080/api/revoke \
+  -H "Authorization: Bearer $REFRESH_TOKEN" > /dev/null
+
+curl -i -X POST http://localhost:8080/api/refresh \
+  -H "Authorization: Bearer $REFRESH_TOKEN"
+```
+
+Expected response:
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 02:23:58 GMT
+Content-Length: 47
+
+{"error":"Couldn't get user for refresh token"}
+```
+
 ### Create a chirp
 Chirps can have a maximum of 140 characters and any profane words (`kerfuffle`, `sharbert`, `fornax`) are automatically replaced with `****`. The user is identified by the JWT, so the user must exist and be logged in.
 
 #### Valid chirp
-Requires `jq` to be installed: `sudo apt install jq`. First resets the database, then creates a `user`, then logs into that user, and then creates the `chirp`; this ensures the `user` exists and there is a valid `token` used.
+Resets the database, creates a `user`, logs into that user, and then creates the `chirp`; this ensures the `user` exists and there is a valid `token` used.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -542,6 +649,7 @@ Content-Length: 203
 *Note: The `user_id` field will be a random UUID correlated with the currently logged in user.*
 
 #### Invalid token
+Resets the database, creates a `user`, tries to create the `chirp` with an invalid access token.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -568,6 +676,7 @@ Content-Length: 33
 ```
 
 #### Too long chirp
+Resets the database, creates a `user`, logs in to get a valid access token, then tries to create the `chirp` with too many characters in the body.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -596,6 +705,7 @@ Content-Length: 29
 ```
 
 #### One bad word in chirp
+Resets the database, creates a `user`, logs in to get a valid access token, then tries to create the `chirp` with one bad word in the body.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -631,6 +741,7 @@ Content-Length: 211
 *Note: Profanity matching is case-insensitive, so `Kerfuffle`, `KERFUFFLE`, `kerFufFle`, etc. are all replaced. Words are space-separated, so `kerfuffle!`, `kerfuffle,` etc. would **not** be replaced.*
 
 #### Multiple bad words in chirp
+Resets the database, creates a `user`, logs in to get a valid access token, then tries to create the `chirp` with multiple bad words in the body.
 ```bash
 curl -s -X POST http://localhost:8080/admin/reset > /dev/null
 
@@ -781,3 +892,142 @@ Content-Length: 30
 
 {"error":"Couldn't get chirp"}
 ```
+
+### Chirp creation with token management
+
+#### Refreshing an access token still allows chirps to be created
+Resets the database, creates a `user`, logs in to get a valid access token (and the refresh token), creates a valid `chirp`, waits for 1 second, refreshes the access token, then creates another `chirp`. This test demonstrates the full refresh token lifecycle: issuing, using, refreshing, and confirming the new access token is distinct.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+LOGIN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}')
+
+TOKEN=$(echo $LOGIN | jq -r '.token')
+REFRESH_TOKEN=$(echo $LOGIN | jq -r '.refresh_token')
+ORIGINAL_TOKEN=$TOKEN
+
+echo
+echo "Creating chirp with original access token:  $TOKEN"
+echo
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}'
+echo
+
+echo
+echo "Waiting..."
+sleep 1  # ensure the refreshed token has a different iat/exp
+echo
+
+TOKEN=$(curl -s -X POST http://localhost:8080/api/refresh \
+  -H "Authorization: Bearer $REFRESH_TOKEN" | jq -r '.token')
+
+echo "Creating chirp with refreshed access token:  $TOKEN"
+echo
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello again from a new access token, World!"}'
+echo
+
+echo
+echo "Tokens are different: $([ \"$ORIGINAL_TOKEN\" != \"$TOKEN\" ] && echo 'YES' || echo 'NO')"
+```
+
+Expected response
+```text
+Creating chirp with original access token:  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiZjhiNjdkNTktZDAxYS00OGYxLTk2MjgtYmM0M2Q1MmNhYTQzIiwiZXhwIjoxNzgyMzYxMDU5LCJpYXQiOjE3ODIzNTc0NTl9.Y3xQRBozFkpt_vo8TSKhFu4qLWyDMghTEuIIZw53n0I
+
+HTTP/1.1 201 Created
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 03:17:39 GMT
+Content-Length: 203
+
+{"id":"b13ca3f9-cd69-4b3c-870c-4c358b1a34fb","created_at":"2026-06-24T21:17:39.075062Z","updated_at":"2026-06-24T21:17:39.075062Z","body":"Hello, World!","user_id":"f8b67d59-d01a-48f1-9628-bc43d52caa43"}
+
+Waiting...
+
+Creating chirp with refreshed access token:  eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjaGlycHktYWNjZXNzIiwic3ViIjoiZjhiNjdkNTktZDAxYS00OGYxLTk2MjgtYmM0M2Q1MmNhYTQzIiwiZXhwIjoxNzgyMzYxMDYwLCJpYXQiOjE3ODIzNTc0NjB9.As4xD4tdC5hLxGYUCrws14uL_p5p1U_aFjmoHun4lAk
+
+HTTP/1.1 201 Created
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 03:17:40 GMT
+Content-Length: 233
+
+{"id":"59f09d65-3beb-4852-a9b4-e320f061c502","created_at":"2026-06-24T21:17:40.104211Z","updated_at":"2026-06-24T21:17:40.104211Z","body":"Hello again from a new access token, World!","user_id":"f8b67d59-d01a-48f1-9628-bc43d52caa43"}
+
+Tokens are different: YES
+```
+*Note: The two access tokens are distinct JWTs with different issued and expiry timestamps. This can be verified by decoding them at [jwt.io](https://www.jwt.io/).*
+*Note: The `user_id` is the same for both `chirps`.*
+*Note: This response is not prettified like most others have been.*
+
+#### Revoking a refresh token disallows chirps to be created
+Resets the database, creates a `user`, logs in to get a valid access token (and the refresh token), creates a valid `chirp`, revokes the refresh token, creates a `chirp` with the still-viable access token, then attempts to refresh the access token.
+```bash
+curl -s -X POST http://localhost:8080/admin/reset > /dev/null
+
+curl -s -X POST http://localhost:8080/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}' > /dev/null
+
+LOGIN=$(curl -s -X POST http://localhost:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "1234"}')
+
+TOKEN=$(echo $LOGIN | jq -r '.token')
+REFRESH_TOKEN=$(echo $LOGIN | jq -r '.refresh_token')
+
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello, World!"}'
+echo
+
+curl -i -X POST http://localhost:8080/api/revoke \
+  -H "Authorization: Bearer $REFRESH_TOKEN"
+
+curl -i -X POST http://localhost:8080/api/chirps \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"body": "Hello again after revocation, World!"}'
+echo
+
+curl -i -X POST http://localhost:8080/api/refresh \
+  -H "Authorization: Bearer $REFRESH_TOKEN"
+echo
+```
+
+Expected response:
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 03:34:53 GMT
+Content-Length: 203
+
+{"id":"46432530-3939-4400-b019-643d558f2d2d","created_at":"2026-06-24T21:34:53.694507Z","updated_at":"2026-06-24T21:34:53.694507Z","body":"Hello, World!","user_id":"b28aed0c-ac96-42ec-b8f8-5136ad800d3a"}
+HTTP/1.1 204 No Content
+Date: Thu, 25 Jun 2026 03:34:53 GMT
+
+HTTP/1.1 201 Created
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 03:34:53 GMT
+Content-Length: 226
+
+{"id":"5ae16a9e-725f-4e2d-9bc7-984e1930c213","created_at":"2026-06-24T21:34:53.712573Z","updated_at":"2026-06-24T21:34:53.712573Z","body":"Hello again after revocation, World!","user_id":"b28aed0c-ac96-42ec-b8f8-5136ad800d3a"}
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+Date: Thu, 25 Jun 2026 03:34:53 GMT
+Content-Length: 47
+
+{"error":"Couldn't get user for refresh token"}
+```
+*Note: This response is not prettified like most others have been.*
+
